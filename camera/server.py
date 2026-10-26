@@ -18,6 +18,9 @@ from fastapi.responses import HTMLResponse, Response, PlainTextResponse
 
 CAPTURE_FPS=30
 TRANSMIT_FPS=10
+# An upload may take as long as the gateway accepts its body: the 15-minute request timeout (250 MiB at ~2.3 Mbit/s)
+# plus Node's 30 s timeout check. Other requests keep httpx's 180 s per operation.
+UPLOAD_TIMEOUT_S=15*60+30
 
 def valid_analysis_url(value):
     parsed=urlparse(value)
@@ -160,12 +163,13 @@ def create_app(service,http_transport=None,port=8001):
         with service.lock:frame=service.latest
         if not frame:return Response(status_code=204)
         return Response(frame[2],media_type='image/jpeg',headers={'Cache-Control':'no-store'})
-    async def proxy(method,path,content=None,content_type=None,params=None,content_length=None):
+    async def proxy(method,path,content=None,content_type=None,params=None,content_length=None,deadline=None):
         headers={'Authorization':'Bearer '+service.token}
         if content_type:headers['content-type']=content_type
         if content_length is not None:headers['content-length']=str(content_length)
         try:
-            async with httpx.AsyncClient(transport=http_transport,timeout=180,follow_redirects=False) as client:
+            # httpx timeouts apply per read or write, so only the overall deadline bounds a slowly streamed upload.
+            async with asyncio.timeout(deadline),httpx.AsyncClient(transport=http_transport,timeout=180,follow_redirects=False) as client:
                 async with client.stream(method,http_base+path,headers=headers,params=params,content=content) as response:
                     data=bytearray()
                     async for chunk in response.aiter_bytes():
@@ -174,7 +178,7 @@ def create_app(service,http_transport=None,port=8001):
                     try:json.loads(data)
                     except (ValueError,UnicodeDecodeError):raise HTTPException(502,'invalid_analysis_response')
                     return Response(bytes(data),status_code=response.status_code,media_type='application/json',headers={'Cache-Control':'no-store'})
-        except httpx.TimeoutException:raise HTTPException(504,'analysis_request_timed_out')
+        except (httpx.TimeoutException,TimeoutError):raise HTTPException(504,'analysis_request_timed_out')
         except httpx.RequestError:raise HTTPException(502,'analysis_service_unavailable')
     @app.post('/videos')
     async def upload_video(request:Request):
@@ -195,7 +199,7 @@ def create_app(service,http_transport=None,port=8001):
                 received+=len(chunk)
                 if received>limit:raise HTTPException(413,'video_too_large')
                 yield chunk
-        return await proxy('POST','/v1/videos',chunks(),content_type,{'camera_id':service.camera_id},size)
+        return await proxy('POST','/v1/videos',chunks(),content_type,{'camera_id':service.camera_id},size,UPLOAD_TIMEOUT_S)
     @app.get('/videos/{job_id}')
     async def video_result(job_id:str,request:Request):
         authorize(request)

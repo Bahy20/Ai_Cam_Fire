@@ -2,15 +2,17 @@ import unittest,json
 from analysis.minicpm_contract import parse_frames,build_prompt
 
 class MiniCPMContractTests(unittest.TestCase):
-    def test_view_quality_has_explicit_mapping_and_cannot_override_legacy_occlusion(self):
-        from analysis.minicpm_contract import parse_batch
+    def test_unrequested_view_quality_is_rejected_not_mapped_to_occlusion(self):
+        from analysis.minicpm_contract import parse_batch,single_image_prompt
         row={'flame':'not_observed','smoke':'not_observed','burning_material':'not_observed','lighter':'not_observed',
-             'flame_relation':'not_observed','view_quality':'assessable','description':'Visible objects, no plume.'}
-        for quality,expected in [('assessable','not_observed'),('obstructed','present'),('uncertain','uncertain')]:
-            result=parse_batch([json.dumps({**row,'view_quality':quality})],['source'])['frames'][0]
-            self.assertEqual(result['occlusion'],expected);self.assertNotIn('view_quality',result)
-        for invalid in ({**row,'view_quality':'safe'},{**row,'occlusion':'not_observed'}):
-            with self.assertRaises(ValueError):parse_batch([json.dumps(invalid)],['source'])
+             'flame_relation':'not_observed','occlusion':'not_observed','description':'Visible objects, no plume.'}
+        self.assertEqual(parse_batch([json.dumps(row)],['source'])['frames'][0],{**row,'frame_id':'source'})
+        self.assertIn('"occlusion"',single_image_prompt());self.assertNotIn('view_quality',single_image_prompt())
+        without_occlusion={k:v for k,v in row.items() if k!='occlusion'}
+        for invalid in [{**without_occlusion,'view_quality':quality} for quality in ('assessable','obstructed','uncertain')]+[
+            {**row,'view_quality':'assessable'},{**row,'view_quality':'safe'},without_occlusion]:
+            with self.assertRaisesRegex(ValueError,'minicpm_invalid'):parse_batch([json.dumps(invalid)],['source'])
+        with self.assertRaisesRegex(ValueError,'minicpm_invalid_single_frame'):parse_batch([json.dumps({**without_occlusion,'view_quality':'assessable'})],['source'])
     def test_exact_frames_and_contradictions(self):
         row={'frame_id':'frame-1','flame':'not_observed','smoke':'not_observed','burning_material':'not_observed',
              'lighter':'not_observed','flame_relation':'not_observed','occlusion':'uncertain','description':'A room.'}

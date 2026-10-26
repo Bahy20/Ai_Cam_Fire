@@ -3,8 +3,13 @@ const $=id=>document.getElementById(id);
 let job=null,pollTimer=null,stream=null,socket=null,frameTimer=null,session=null,seq=0,lastResult=0,cameraStarting=false,cameraGeneration=0;
 let lastLiveResult=null,reviewTarget=null;
 const messages={unauthorized:'Your session expired. Reload and enter the tester code.',video_job_busy:'Another video is processing. Please try again shortly.',live_session_busy:'Another tester is using the live stream. Please try again shortly.',scout_http_429:'Scout is rate-limited or its allowance is exhausted.',scout_timeout:'Scout did not respond in time.',scout_provider_cooldown:'Scout is temporarily paused after a provider error.'};
-const describe=value=>messages[value]||value||'Request failed. Please try again.';
+const describe=value=>messages[value]||(/^frame_reader_/.test(value)?messages.frame_reader_unavailable:value)||'Request failed. Please try again.';
 Object.assign(messages,{minicpm_timeout:'MiniCPM did not respond in time.',minicpm_invalid_response:'MiniCPM returned inconsistent or incomplete evidence.',minicpm_remote_failure:'MiniCPM is temporarily unavailable.',minicpm_bridge_unavailable:'The model connection is unavailable.'});
+Object.assign(messages,{video_too_large:'The video is larger than 250 MiB.',video_required:'Choose a video file to upload.',invalid_multipart:'The upload was incomplete or malformed. Please try again.',
+  unsupported_video_format:'The file is not a supported MP4, MOV or AVI video.',upload_storage_limit:'Upload storage is full. Please try again later.',video_store_failed:'The server could not save the video. Please try again later.',
+  invalid_jpeg_or_dimensions:'A camera frame could not be read. Start the webcam again.',frame_decode_failure:'A camera frame could not be checked. Start the webcam again.',
+  frame_reader_timeout:'Frame checking timed out. Start the webcam again.',frame_reader_unavailable:'Frame checking is briefly unavailable. Start the webcam again shortly.',
+  stale_frame:'Camera frames arrived late. Check your connection and start the webcam again.',duplicate_or_reordered_frame:'Camera frames arrived out of order. Start the webcam again.'});
 Object.assign(messages,{alert_updated_review_again:'The alert changed or has new evidence. Open Review earlier alert again to review the latest finding.',live_session_not_found:'This live session ended. Start the webcam again.'});
 async function api(path,options={}){const r=await fetch(path,{...options,cache:'no-store'});let body;try{body=await r.json();}catch{throw new Error('The service is starting or unavailable. Please retry shortly.');}if(!r.ok)throw new Error(describe(body.error));return body;}
 function signedIn(ok){$('login').hidden=ok;$('lab').hidden=!ok;$('badge').textContent=ok?'Connected to Modal':'Tester access';}
@@ -20,14 +25,15 @@ function render(prefix,result,inferences=[]){
     lastLiveResult=result;
     $('review-open').hidden=!result?.incident_history?.reviewable;
     const native=result?.native_stream;
-    const state={connecting:'Starting live analysis… First startup may take a minute; keep the camera running.',reconnecting:'Reconnecting live analysis… Keep the camera running.',listening:'Live video connected',speaking:'Live model is reporting',
+    const state={connecting:'Starting live analysis… First startup can take up to five minutes; keep the camera running.',reconnecting:'Reconnecting live analysis… Keep the camera running.',listening:'Live video connected',speaking:'Live model is reporting',
       unavailable:'Live model connection unavailable',stalled:'Waiting for the live model',invalid_response:'Live model response unavailable'};
     $('live-native').textContent=native?(state[native.state]||'Live model starting')+(native.native_chunks?` · ${native.native_chunks} frames processed`:''):'';
     if(native?.state==='connecting'&&Number.isFinite(native.startup_elapsed_ms))$('live-native').textContent+=` ${Math.floor(native.startup_elapsed_ms/1000)}s elapsed.`;
     if(native && native.assessment_status!=='current')$('live-native').textContent+='. No current valid scene report.';
     const row=native?.assessment;
     $('live-observation').textContent=row&&native.assessment_status==='current'?'Current model observation: '+row.description:'';
-    if(row && native.assessment_status==='current' && Date.now()-(native.assessment_ts_ms??0)<=10000){
+    // Both times come from the server clock; the browser clock may be skewed.
+    if(row && native.assessment_status==='current' && (result.emitted_at_ms??0)-(native.assessment_ts_ms??0)<=10000){
       const label={present:'observed',not_observed:'not observed',uncertain:'uncertain'};
       $('live-native').textContent+=`. Flame: ${label[row.flame]||'unknown'}; smoke: ${label[row.smoke]||'unknown'}; other material burning: ${label[row.burning_material]||'unknown'}.`;
     }
@@ -85,7 +91,7 @@ $('upload-form').onsubmit=e=>{
   e.preventDefault();const file=$('file').files[0];if(!file)return;
   if(!/\.(mp4|mov|avi)$/i.test(file.name)||!file.size||file.size>250*1024*1024){$('upload-status').textContent='Choose an MP4, MOV or AVI file up to 250 MiB.';return;}
   clearTimeout(pollTimer);job=null;uploadBusy(true);$('retry').hidden=true;$('upload-result').hidden=true;$('progress').hidden=false;$('progress').value=0;$('upload-status').textContent='Uploading…';
-  const xhr=new XMLHttpRequest();xhr.open('POST','/v1/videos');xhr.timeout=300000;
+  const xhr=new XMLHttpRequest();xhr.open('POST','/v1/videos');xhr.timeout=960000;
   xhr.upload.onprogress=e=>{if(e.lengthComputable){$('progress').value=e.loaded/e.total*100;$('upload-status').textContent=e.loaded===e.total?'Upload sent; waiting for analysis…':`Uploading… ${Math.round(e.loaded/e.total*100)}%`;}};
   xhr.onload=()=>{try{const r=JSON.parse(xhr.responseText);if(xhr.status!==202)throw new Error(describe(r.error));if(!r.id)throw new Error('Missing job identifier.');job=r.id;$('progress').hidden=true;void poll();}catch(error){$('upload-status').textContent=error.message;uploadBusy(false);$('progress').hidden=true;}};
   xhr.onerror=xhr.ontimeout=()=>{$('upload-status').textContent='Upload failed or timed out. Please try again.';uploadBusy(false);$('progress').hidden=true;};

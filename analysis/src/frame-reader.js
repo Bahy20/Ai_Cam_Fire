@@ -61,7 +61,9 @@ export class FrameReader {
       if(this.child)this.send(this.child,job);else this.respawn();
     });
   }
-  infer(image_b64){return this.request('infer',{image_b64});}
+  // stream (session or job id) and ts_ms let the worker compare consecutive frames of one source for camera motion;
+  // without them camera_motion is null. JSON drops undefined, so a call without options sends neither.
+  infer(image_b64,{stream,ts_ms}={}){return this.request('infer',{image_b64,stream,ts_ms});}
   open(path){return this.request('video_open',{path});}
   next(){return this.request('video_next');}
   closeVideo(){return this.request('video_close');}

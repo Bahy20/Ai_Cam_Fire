@@ -34,6 +34,24 @@ test('a killed worker is replaced on the next request after the restart backoff'
   }finally{reader.close();for(const child of spawned)child.kill();}
 });
 
+test('infer forwards stream and ts_ms so only consecutive frames of one stream are compared for camera motion',async()=>{
+  const {spawned,spawn:spawnChild}=counting(),reader=new FrameReader({spawn:spawnChild});
+  try{
+    const lines=[];reader.send=(child,job)=>{lines.push(job.line);FrameReader.prototype.send.call(reader,child,job);};
+    const image_b64=execFileSync(reader.python,['-c',"import base64,sys,cv2,numpy as n;r=n.random.default_rng(0);i=n.full((480,640,3),120,n.uint8)\n"+
+      "for _ in range(120):x,y=map(int,r.integers(0,600,2));cv2.rectangle(i,(x,y),(x+40,y+30),tuple(map(int,r.integers(0,256,3))),-1)\n"+
+      "sys.stdout.write(base64.b64encode(cv2.imencode('.jpg',i)[1].tobytes()).decode())"]).toString();
+    const plain=await reader.infer(image_b64);assert.equal(plain.camera_motion,null);assert.equal(plain.low_detail,false);
+    assert.equal((await reader.infer(image_b64,{stream:'s1',ts_ms:1000})).camera_motion,null,'no previous frame');
+    assert.equal((await reader.infer(image_b64,{stream:'s2',ts_ms:1333})).camera_motion,null,'another stream');
+    const same=await reader.infer(image_b64,{stream:'s1',ts_ms:1333});assert.equal(same.camera_motion,false);
+    assert.equal(typeof same.metrics.detail_laplacian_var,'number');assert.equal(typeof same.metrics.noise_sigma,'number');
+    assert.equal((await reader.infer(image_b64,{stream:'s1',ts_ms:5000})).camera_motion,null,'gap over 1500 ms');
+    const sent=lines.map(line=>JSON.parse(line));assert.deepEqual(Object.keys(sent[0]).sort(),['id','image_b64','op']);
+    assert.equal(sent[1].stream,'s1');assert.equal(sent[1].ts_ms,1000);
+  }finally{reader.close();for(const child of spawned)child.kill();}
+});
+
 test('a stale exit from the replaced worker cannot fail requests on its successor',async()=>{
   const {spawned,spawn:spawnChild}=counting(),reader=new FrameReader({spawn:spawnChild,restartDelayMs:0});
   try{

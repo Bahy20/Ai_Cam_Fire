@@ -10,7 +10,7 @@ test('transient GPU busy close retries automatically and close cancels further r
   wss.on('connection',ws=>{attempts++;if(attempts===1){ws.close(1013,'previous inference draining');return;}
     ws.on('message',bytes=>{const msg=JSON.parse(bytes);if(msg.type==='start')ws.send(JSON.stringify({type:'native_ready',engine:'minicpm-native-visual',session_id:'retry'}));});});
   const stream=new NativeStream({url:`ws://127.0.0.1:${wss.address().port}`,allowLoopback:true,token:'test',sessionId:'retry',onState:s=>states.push(s),retryDelays:[5,10]});
-  try{await stream.open();assert.equal(attempts,2);assert.ok(states.includes('reconnecting'));assert.equal(stream.ready,true);}
+  try{await stream.open();assert.equal(attempts,2);assert.deepEqual(states,['connecting','listening'],'a retry before the first native_ready is still connecting');assert.equal(stream.ready,true);}
   finally{stream.close();for(const client of wss.clients)client.terminate();await new Promise(resolve=>wss.close(resolve));}
 });
 test('busy retries are bounded and authentication denial is not retried',async()=>{
@@ -76,7 +76,7 @@ test('a 1012 session rotation after a delivered result reconnects promptly with 
       else if(s==='listening')stream.push(frame(1));}});
   try{
     await stream.open();const elapsed=await relistened;
-    assert.deepEqual(states,['connecting','reconnecting','listening','reconnecting','listening']);assert.equal(results.length,1);
+    assert.deepEqual(states,['connecting','listening','reconnecting','listening']);assert.equal(results.length,1);
     assert.equal(attempts,3);assert.equal(stream.ready,true);assert.ok(elapsed<1500,`rotation reconnect took ${elapsed}ms`);
   }finally{stream.close();for(const ws of server.clients)ws.terminate();await new Promise(r=>server.close(r));}
 });
@@ -106,4 +106,51 @@ test('transient drops separated by successful sessions never exhaust the retry b
     assert.equal(states.includes('unavailable'),false);assert.equal(attempts,7);assert.equal(stream.ready,true);assert.equal(results.length,7);
     assert.equal(states.filter(s=>s==='listening').length,7);assert.equal(states.filter(s=>s==='reconnecting').length,6);
   }finally{stream.close();for(const ws of server.clients)ws.terminate();await new Promise(r=>server.close(r));}
+});
+test('a slow cold-start handshake stays connecting until ready, within a 300 s default deadline',async()=>{
+  // The fake service completes each WebSocket handshake 300 ms late, standing in for a cold GPU container.
+  const server=new WebSocketServer({host:'127.0.0.1',port:0,verifyClient:(info,done)=>setTimeout(()=>done(true),300)});await once(server,'listening');
+  server.on('connection',ws=>ws.on('message',bytes=>sendReady(ws,bytes)));
+  const url=`ws://127.0.0.1:${server.address().port}`,states=[],late=[];
+  assert.equal(new NativeStream({url,allowLoopback:true,token:'t',sessionId:'default'}).connectTimeoutMs,300000);
+  const stream=new NativeStream({url,allowLoopback:true,token:'t',sessionId:'cold',connectTimeoutMs:2000,onState:s=>states.push(s)});
+  const expired=new NativeStream({url,allowLoopback:true,token:'t',sessionId:'late',connectTimeoutMs:100,retryDelays:[5],onState:s=>late.push(s)});
+  try{
+    const opened=stream.open();await new Promise(r=>setTimeout(r,150));assert.deepEqual(states,['connecting']);
+    await opened;assert.deepEqual(states,['connecting','listening']);
+    await assert.rejects(expired.open(),/native_connect_timeout|native_connection_unavailable/);assert.equal(late.at(-1),'unavailable');
+  }finally{stream.close();expired.close();for(const ws of server.clients)ws.terminate();await new Promise(r=>server.close(r));}
+});
+test('a cold start that answers 503 for longer than the retry budget still connects before the deadline',async()=>{
+  const {createServer}=await import('node:http');let refused=0;const wss=new WebSocketServer({noServer:true});
+  // The client resets a refused handshake's socket as soon as it reads the 503; an upgrade socket has no error listener of
+  // its own, so without one that reset is an uncaught ECONNRESET on a loaded machine.
+  const server=createServer();server.on('upgrade',(request,socket,head)=>{socket.on('error',()=>{});
+    if(refused<6){refused++;socket.end('HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n');return;}
+    wss.handleUpgrade(request,socket,head,ws=>ws.on('message',bytes=>{if(JSON.parse(bytes).type==='start')
+      ws.send(JSON.stringify({type:'native_ready',engine:'minicpm-native-visual',session_id:'cold'}));}));});
+  server.listen(0,'127.0.0.1');await once(server,'listening');const states=[];
+  const stream=new NativeStream({url:`ws://127.0.0.1:${server.address().port}`,allowLoopback:true,token:'test',sessionId:'cold',retryDelays:[5,10],onState:s=>states.push(s)});
+  try{await stream.open();assert.equal(refused,6,'six refusals against a budget of two retries');assert.equal(stream.ready,true);
+    assert.deepEqual(states,['connecting','listening'],'a cold start shows connecting, never reconnecting');assert.equal(stream.retries,0);}
+  finally{stream.close();for(const ws of wss.clients)ws.terminate();await new Promise(r=>server.close(r));}
+  // The deadline still bounds a GPU that never comes up.
+  const dead=createServer();dead.on('upgrade',(request,socket)=>socket.on('error',()=>{}).end('HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n'));
+  dead.listen(0,'127.0.0.1');await once(dead,'listening');
+  const never=new NativeStream({url:`ws://127.0.0.1:${dead.address().port}`,allowLoopback:true,token:'test',sessionId:'never',retryDelays:[5,10],connectTimeoutMs:200});
+  try{await assert.rejects(never.open(),/native_connect_timeout|unavailable/);}finally{never.close();await new Promise(r=>dead.close(r));}
+});
+test('the first drop after a long cold start reconnects with the full retry budget',async()=>{
+  const {createServer}=await import('node:http');let refused=0,connections=0,done;const wss=new WebSocketServer({noServer:true});const states=[];
+  const settled=new Promise(r=>{done=r;});
+  const server=createServer();server.on('upgrade',(request,socket,head)=>{socket.on('error',()=>{});
+    if(refused<6){refused++;socket.end('HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n');return;}
+    wss.handleUpgrade(request,socket,head,ws=>{connections++;ws.on('message',bytes=>{sendReady(ws,bytes);if(connections===1)ws.close(1012,'session_rotation');});});});
+  server.listen(0,'127.0.0.1');await once(server,'listening');
+  const stream=new NativeStream({url:`ws://127.0.0.1:${server.address().port}`,allowLoopback:true,token:'test',sessionId:'cold-drop',retryDelays:[5,10],
+    onState:s=>{states.push(s);if(s==='unavailable'||s==='listening'&&connections===2)done();}});
+  try{
+    await stream.open();await settled;
+    assert.deepEqual(states,['connecting','listening','reconnecting','listening']);assert.equal(stream.ready,true);
+  }finally{stream.close();for(const ws of wss.clients)ws.terminate();await new Promise(r=>server.close(r));}
 });

@@ -1,7 +1,10 @@
+import asyncio
 import json
 import struct
 import unittest
+from unittest import mock
 import httpx
+from camera import server
 from camera.server import frame_packet, valid_analysis_url, create_app, CaptureService
 from fastapi.testclient import TestClient
 LOCAL='http://127.0.0.1:8001'
@@ -49,6 +52,17 @@ class CameraTests(unittest.TestCase):
             self.assertNotIn('private connection',response.text)
             self.assertEqual(client.get('/videos/invalid',headers=headers).status_code,422)
 
+    def test_upload_forward_deadline_matches_the_gateway_upload_timeout(self):
+        # The gateway accepts an upload body for 15 minutes; the bridge must not give up sooner, but does give up.
+        self.assertGreaterEqual(server.UPLOAD_TIMEOUT_S,15*60)
+        async def remote(request):
+            await asyncio.sleep(5 if request.method=='POST' else .4)
+            return httpx.Response(200,json={'id':'12345678-1234-1234-1234-123456789abc','status':'complete'})
+        service=CaptureService('wss://example.com/v1/live','key','test-camera');headers={'x-local-control':service.ui_token}
+        with mock.patch.object(server,'UPLOAD_TIMEOUT_S',.2),TestClient(create_app(service,http_transport=httpx.MockTransport(remote)),base_url=LOCAL) as client:
+            response=client.post('/videos',headers=headers,files={'video':('clip.mp4',b'data')})
+            self.assertEqual((response.status_code,response.json()['detail']),(504,'analysis_request_timed_out'))
+            self.assertEqual(client.get('/videos/12345678-1234-1234-1234-123456789abc',headers=headers).status_code,200,'other requests have no overall deadline')
     def test_raw_frame_packet_has_no_analysis(self):
         packet=frame_packet('session',1,1000,b'jpeg')
         size=struct.unpack('>I',packet[:4])[0]

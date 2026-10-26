@@ -36,6 +36,9 @@ export function credentials(options={},env=process.env) {
 const isoBox=h=>['ftyp','moov','mdat','wide','free','skip'].includes(h.toString('latin1',4,8));
 const signatures={'.mp4':isoBox,'.mov':isoBox,
   '.avi':h=>h.toString('latin1',0,4)==='RIFF'&&h.toString('latin1',8,12)==='AVI '};
+// A short snake_case code from the frame reader (bad JPEG, worker timeout or restart) tells the user more than the
+// generic failure; free-text exception messages do not leave the server.
+const readerCode=error=>/^[a-z][a-z0-9]*(_[a-z0-9]+)+$/.test(error?.message??'')&&error.message.length<=64?error.message:'frame_decode_failure';
 async function header(path) {
   const file=await openFile(path,'r');
   try{const {buffer,bytesRead}=await file.read(Buffer.alloc(12),0,12,0);return buffer.subarray(0,bytesRead);}finally{await file.close();}
@@ -46,15 +49,24 @@ export async function buildServer(options={}) {
   const uploadDir=join(dataDir,'uploads');await mkdir(uploadDir,{recursive:true});
   const store=options.store??new Store(join(dataDir,'fireguard.sqlite'));
   const frameReader=options.frameReader??new FrameReader();const scout=options.analyzer??options.scout??new MiniCPM();
-  const now=options.now??Date.now,sleep=options.sleep??delay;
+  const now=options.now??Date.now,sleep=options.sleep??delay,livePingMs=options.livePingMs??15000;
+  // Node's requestTimeout is server-wide, so it is sized for a 250 MiB upload on a ~2.3 Mbit/s uplink (15 minutes);
+  // every HTTP request starts with the former two-minute limit (onRequest hook below), which only an authorized upload
+  // that holds the upload slot lifts.
+  const uploadTimeoutMs=options.uploadTimeoutMs??900000,requestTimeoutMs=options.requestTimeoutMs??120000;
   const nativeStreamFactory=options.nativeStreamFactory??(process.env.MINICPM_NATIVE_URL?
     settings=>new NativeStream({url:process.env.MINICPM_NATIVE_URL,token:nativeToken,...settings}):null);
   const expected=new Set(options.expectedCameraIds??(process.env.EXPECTED_LIGHTER_CAMERAS??'').split(',').filter(Boolean));
   const hazards=new Set(options.hazardCameraIds??(process.env.HAZARDOUS_CAMERAS??'').split(',').filter(Boolean));
-  const app=Fastify({logger:false,bodyLimit:MAX_MESSAGE,requestTimeout:120000,
+  const app=Fastify({logger:false,bodyLimit:MAX_MESSAGE,requestTimeout:uploadTimeoutMs,
     ...(options.https?{https:options.https}:{})});
   await app.register(websocket,{options:{maxPayload:MAX_MESSAGE,perMessageDeflate:false}});
-  await app.register(multipart,{limits:{fileSize:250*1024*1024,files:1,fields:0,parts:1}});
+  await app.register(multipart,{limits:{fileSize:options.uploadLimitBytes??250*1024*1024,files:1,fields:0,parts:1}});
+  // Added before authentication, so a refused (unauthorized or busy) upload's slow body is cut too. WebSocket upgrades carry no body.
+  app.addHook('onRequest',async request=>{
+    const raw=request.raw;if(request.ws)return;
+    const timer=request.bodyTimer=setTimeout(()=>{if(!raw.complete)raw.destroy();},requestTimeoutMs);timer.unref();raw.once('close',()=>clearTimeout(timer));
+  });
   const testers=testerAccess(app,{code:options.testerCode??process.env.TESTER_ACCESS_CODE,secret:cookieSecret,
     origin:options.testerOrigin??process.env.TESTER_PUBLIC_ORIGIN,trustProxy:options.trustProxy??process.env.FIREGUARD_TRUST_PROXY==='1',now});
   let live=null,activeJob=null,uploadReserved=false,closing=false;
@@ -95,7 +107,11 @@ export async function buildServer(options={}) {
     const expiry=request.testerSession?setTimeout(()=>socket.close(1000,'Ten-minute test session ended'),Math.min(600000,request.testerSession.expires-now())):null;
     if(expiry)socket.once('close',()=>clearTimeout(expiry));
     sockets.add(socket);let coordinator=null,nativeStream=null,sourceSession=null,lastSequence=0,lastTs=-1,lastSample=-Infinity,lastNative=-Infinity;
-    let busy=false,pending=null,dropped=0,frameWork=Promise.resolve(),nativeGeneration=0;
+    let busy=false,pending=null,dropped=0,frameWork=Promise.resolve(),nativeGeneration=0,lastClientTs=-1,minLag=Infinity;
+    // A browser that vanished without a FIN (sleep, dropped network) would hold the only live slot until TCP gives up.
+    // A pong or any message since the previous ping proves it alive, so a proxy that swallowed pings cannot end a stream.
+    let alive=true;const heartbeat=setInterval(()=>{if(!alive)return socket.terminate();alive=false;socket.ping();},livePingMs);
+    socket.on('pong',()=>{alive=true;});
     const startNative=()=>{
       if(!nativeStreamFactory||!coordinator?.connected)return;
       const generation=++nativeGeneration;
@@ -111,17 +127,18 @@ export async function buildServer(options={}) {
       const frame=pending;pending=null;busy=true;
       frameWork=(async()=>{
         try {
-          const image_b64=frame.jpeg.toString('base64');const observation=await frameReader.infer(image_b64);
+          const image_b64=frame.jpeg.toString('base64');const observation=await frameReader.infer(image_b64,{stream:coordinator.sessionId,ts_ms:frame.ts_ms});
           if(coordinator.connected){
             coordinator.accept({...observation,ts_ms:frame.ts_ms,image_b64});
-            // The exact image that becomes native evidence must pass pixel checks.
-            if(coordinator.usable()&&frame.ts_ms-lastNative>=200){nativeStream?.push(frame);lastNative=frame.ts_ms;}
+            // The exact image that becomes native evidence must pass pixel checks; a skipped (moving) frame is not current.
+            if(coordinator.usable()&&coordinator.current?.ts_ms===frame.ts_ms&&frame.ts_ms-lastNative>=200){nativeStream?.push(frame);lastNative=frame.ts_ms;}
           }
-        } catch {if(coordinator.connected){coordinator.gap('frame_decode_failure');send({type:'error',error:'frame_decode_failure'});}}
+        } catch(error) {if(coordinator.connected){const code=readerCode(error);coordinator.gap(code);send({type:'error',error:code});}}
         finally{busy=false;pump();}
       })();
     };
     socket.on('message',(message,isBinary)=>{
+      alive=true;
       try {
         if(!isBinary) {
           if(message.length>4096)throw new Error('control_too_large');
@@ -131,17 +148,23 @@ export async function buildServer(options={}) {
           if(coordinator || live)throw new Error('live_session_busy');
           sourceSession=control.session_id;
           const cameraId=request.testerSession?'tester-'+request.testerSession.id:control.camera_id;
-          coordinator=makeCoordinator(cameraId,randomUUID(),'live',body=>send({type:'result',...body}),request.testerSession?'test-camera':cameraId);
+          coordinator=makeCoordinator(cameraId,randomUUID(),'live',body=>send({type:'result',...body}),request.testerSession?'tester':cameraId);
           live=coordinator;send({type:'ready',session_id:sourceSession,assessment_session_id:coordinator.sessionId});
           restartNative.set(coordinator,startNative);startNative();
           return;
         }
         if(!coordinator)throw new Error('start_required');
-        const frame=decodeFrame(message);
-        if(frame.session_id!==sourceSession)throw new Error('session_mismatch');
-        if(frame.sequence<=lastSequence || frame.ts_ms<=lastTs)throw new Error('duplicate_or_reordered_frame');
-        if(frame.ts_ms>now()+1000 || now()-frame.ts_ms>5000)throw new Error('stale_or_future_frame');
-        lastSequence=frame.sequence;lastTs=frame.ts_ms;
+        const source=decodeFrame(message);
+        if(source.session_id!==sourceSession)throw new Error('session_mismatch');
+        if(source.sequence<=lastSequence || source.ts_ms<=lastClientTs)throw new Error('duplicate_or_reordered_frame');
+        // A skewed client clock must not block streaming, so it is only compared with itself: a frame delayed 5 s more
+        // than the session's least-delayed one is stale. Downstream (sampling, evidence ids, native push) uses capture time
+        // mapped onto the server clock by that least delay, so a delayed burst keeps its real age; it is strictly increasing
+        // and never later than now (a second frame within the same millisecond is dropped).
+        const at=now(),lag=at-source.ts_ms;minLag=Math.min(minLag,lag);if(lag-minLag>5000)throw new Error('stale_frame');
+        lastSequence=source.sequence;lastClientTs=source.ts_ms;
+        const ts=Math.max(source.ts_ms+minLag,lastTs+1);if(ts>at)return;
+        lastTs=ts;const frame={...source,ts_ms:ts};
         // Server chooses inference samples. Source sequence gaps remain visible.
         if(frame.ts_ms-lastSample+1<1000/3)return;
         lastSample=frame.ts_ms;if(pending)dropped++;pending=frame;pump();
@@ -150,7 +173,7 @@ export async function buildServer(options={}) {
         send({type:'error',error:error.message,dropped_frames:dropped});
       }
     });
-    socket.on('close',()=>{sockets.delete(socket);nativeStream?.close();nativeStreams.delete(nativeStream);if(coordinator){coordinator.disconnect();if(live===coordinator)live=null;
+    socket.on('close',()=>{clearInterval(heartbeat);sockets.delete(socket);nativeStream?.close();nativeStreams.delete(nativeStream);if(coordinator){coordinator.disconnect();if(live===coordinator)live=null;
       void retire(coordinator);}pending=null;});
     socket.on('error',()=>socket.close());
   });
@@ -181,7 +204,7 @@ export async function buildServer(options={}) {
         const frame=await frameReader.next();
         if(frame.eof){store.job(id,{decoded_frames:frame.decoded_frames});break;}
         await sleep(Math.max(0,frame.ts_ms-(now()-started)));
-        const observation=await frameReader.infer(frame.image_b64);
+        const observation=await frameReader.infer(frame.image_b64,{stream:id,ts_ms:frame.ts_ms});
         c.accept({...observation,ts_ms:frame.ts_ms,image_b64:observation.image_b64??frame.image_b64});await c.drain();sampled++;
         store.job(id,{sampled_frames:sampled,source_ts_ms:frame.ts_ms});
       }
@@ -198,23 +221,34 @@ export async function buildServer(options={}) {
     if(activeJob || uploadReserved)return reply.code(409).send({error:'video_job_busy'});
     const cameraId=request.testerSession?'tester-'+request.testerSession.id:request.query.camera_id??'test-camera';
     if(typeof cameraId!=='string'||!cameraPattern.test(cameraId))return reply.code(400).send({error:'invalid_camera_id'});
-    uploadReserved=true;let path;
+    uploadReserved=true;let path,received=false;
     try {
       const files=await readdir(uploadDir);let total=0;
       for(const file of files)total+=(await stat(join(uploadDir,file))).size;
       if(total>750*1024*1024)return reply.code(507).send({error:'upload_storage_limit'});
-      const part=await request.file();if(!part)return reply.code(400).send({error:'video_required'});
+      clearTimeout(request.bodyTimer);const part=await request.file();if(!part)return reply.code(400).send({error:'video_required'});
       const extension=extname(part.filename).toLowerCase();
       if(!Object.hasOwn(signatures,extension)){part.file.resume();return reply.code(415).send({error:'unsupported_video_format'});}
       const id=randomUUID();path=join(uploadDir,id+extension);
-      await pipeline(part.file,createWriteStream(path,{flags:'wx'}));
+      // A body that ends inside the file part can leave the file stream neither ended nor errored, holding the upload
+      // slot forever, so once the request is fully read (or gone) the file must finish within a few seconds.
+      const out=createWriteStream(path,{flags:'wx'});let guard;
+      const cut=()=>{guard=setTimeout(()=>out.destroy(new Error('multipart_truncated')),3000);};
+      if(request.raw.destroyed)cut();else request.raw.once('close',cut);
+      try{await pipeline(part.file,out);}finally{clearTimeout(guard);request.raw.off('close',cut);}
       if(part.file.truncated)throw new Error('video_too_large');
+      received=true;
       // A renamed non-video file stops here; `path` is still set, so finally deletes it.
       if(!signatures[extension](await header(path)))return reply.code(415).send({error:'unsupported_video_format'});
       store.job(id,{status:'queued',camera_id:cameraId,tester_id:request.testerSession?.id??null,filename:part.filename.slice(0,200),created_at_ms:now()});
-      activeJob=runVideo(id,path,cameraId,request.testerSession?'test-camera':cameraId).finally(()=>{activeJob=null;});path=null;
+      activeJob=runVideo(id,path,cameraId,request.testerSession?'tester':cameraId).finally(()=>{activeJob=null;});path=null;
       return reply.code(202).send({id,status:'queued',result_url:`/v1/videos/${id}`});
-    } catch(error){return reply.code(error.code==='FST_REQ_FILE_TOO_LARGE'||error.message==='video_too_large'?413:400).send({error:'video_upload_failed'});}
+    } catch(error){
+      // Filesystem errors carry a syscall; malformed or extra multipart parts and an aborted client do not.
+      const [status,code]=error.code==='FST_REQ_FILE_TOO_LARGE'||error.message==='video_too_large'?[413,'video_too_large']:
+        received||error.syscall?[500,'video_store_failed']:[400,'invalid_multipart'];
+      return reply.code(status).send({error:code});
+    }
     finally{uploadReserved=false;if(path)await unlink(path).catch(()=>{});}
   });
   app.get('/v1/videos/:id',async(request,reply)=>{

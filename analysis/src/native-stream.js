@@ -2,19 +2,22 @@ import WebSocket from 'ws';
 import {encodeFrame} from './protocol.js';
 
 export class NativeStream {
-  constructor({url,token,sessionId,onResult=()=>{},onState=()=>{},allowLoopback=false,retryDelays=[250,500,1000,2000,3000,3000,3000,3000]}){
+  // connectTimeoutMs bounds each connect (open or reconnect). A cold H100 start needs container scheduling and image load
+  // before the class's 180 s startup_timeout runs, so the default 300 s outlasts it.
+  constructor({url,token,sessionId,onResult=()=>{},onState=()=>{},allowLoopback=false,retryDelays=[250,500,1000,2000,3000,3000,3000,3000],
+    connectTimeoutMs=300000}){
     const target=new URL(url);
     if(!(target.protocol==='https:' || target.protocol==='wss:' || allowLoopback && target.protocol==='ws:' && target.hostname==='127.0.0.1') ||
       target.username || target.password || target.search || target.hash || !['','/'].includes(target.pathname))throw new Error('native_url');
     if(!token)throw new Error('native_token_required');
     target.protocol=target.protocol==='https:'?'wss:':target.protocol;target.pathname='/v1/stream';
-    Object.assign(this,{url:target.href,token,sessionId,onResult,onState,retryDelays});this.sent=new Map();this.closed=false;this.ready=false;this.latest=null;this.lastResult=0;this.retries=0;
+    Object.assign(this,{url:target.href,token,sessionId,onResult,onState,retryDelays,connectTimeoutMs});this.sent=new Map();this.closed=false;this.ready=false;this.latest=null;this.lastResult=0;this.retries=0;this.coldRetries=0;
   }
   open(){
     if(this.opening)return this.opening;
     this.onState('connecting');
     this.opening=new Promise((resolve,reject)=>{this.resolveReady=()=>{this.established=true;resolve();};this.rejectReady=reject;});
-    this.deadline=Date.now()+180000;this.connect();return this.opening;
+    this.deadline=Date.now()+this.connectTimeoutMs;this.connect();return this.opening;
   }
   connect(){
       if(this.closed)return;
@@ -28,9 +31,16 @@ export class NativeStream {
         if(this.closed)return;
         // 1013: GPU busy draining; 1012: server-side session rotation; 1006: dropped link (not an auth denial).
         const transient=code===1013||code===1012||code===1006&&!/401|403/.test(socketError?.message??'');
-        if(transient&&this.retries<this.retryDelays.length){
-          if(this.established)this.deadline=Date.now()+180000;
-          const delay=this.retryDelays[this.retries++];this.onState('reconnecting');
+        // Before the first native_ready a dropped handshake (an HTTP error from Modal's proxy) most likely means the GPU is
+        // still cold-starting, so it keeps retrying (backing off to the slowest delay) until the connect deadline without
+        // using the busy-retry budget, which the first drop after a long cold start still has. A 1013 busy close stays
+        // bounded. Until the first native_ready every retry is still connecting, not reconnecting.
+        const status=/Unexpected server response: (\d+)/.exec(socketError?.message??'')?.[1];
+        const coldStart=transient&&code===1006&&!this.established&&(!status||['502','503','504'].includes(status));
+        if(transient&&(coldStart||this.retries<this.retryDelays.length)){
+          if(this.established)this.deadline=Date.now()+this.connectTimeoutMs;
+          const delay=this.retryDelays[Math.min(coldStart?this.coldRetries++:this.retries++,this.retryDelays.length-1)];
+          if(this.established)this.onState('reconnecting');
           this.retryTimer=setTimeout(()=>{this.retryTimer=null;this.connect();},delay);
         }else{this.onState('unavailable');this.rejectReady(new Error('native_connection_unavailable'));}
       };

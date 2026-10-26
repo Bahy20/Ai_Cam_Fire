@@ -57,12 +57,9 @@ def parse_batch(raws,ids):
         text=raw.strip()
         if text.startswith('```json\n') and text.endswith('\n```'):text=text[8:-4]
         row=json.loads(text,object_pairs_hook=unique)
-        if not isinstance(row,dict) or 'frame_id' in row:raise ValueError('minicpm_invalid_single_frame')
-        if 'view_quality' in row:
-            quality=row.pop('view_quality')
-            if 'occlusion' in row or not isinstance(quality,str) or quality not in {'assessable','obstructed','uncertain'}:
-                raise ValueError('minicpm_invalid_view_quality')
-            row['occlusion']={'assessable':'not_observed','obstructed':'present','uncertain':'uncertain'}[quality]
+        # single_image_prompt asks for occlusion only. An unrequested key (e.g. view_quality from an old probe prompt) means
+        # the reply did not follow this contract, so it is rejected rather than mapped onto a finding.
+        if not isinstance(row,dict) or 'frame_id' in row or 'view_quality' in row:raise ValueError('minicpm_invalid_single_frame')
         canonical=json.dumps({'frames':[{**row,'frame_id':frame_id}]})
         rows.append(parse_frames(canonical,[frame_id])['frames'][0])
     return {'frames':rows}

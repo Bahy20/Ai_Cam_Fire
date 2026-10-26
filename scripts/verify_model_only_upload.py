@@ -32,7 +32,7 @@ def main():
     OUT.joinpath('model-only-http-upload.json').write_text(json.dumps(data,indent=2),encoding='utf-8')
     assert data['status']=='complete',data.get('error')
     result=data['result'];assert result['detection']['source']=='minicpm'
-    assert result['priority']['policy_version']=='minicpm-only-v3'
+    assert result['priority']['policy_version']=='minicpm-only-v4'
     assert data['inferences'] and all(x['mode']=='fresh' and not x['validation_errors'] for x in data['inferences'])
     # This camera crop contains a nearby face. The model may report occlusion;
     # UNKNOWN is then correct, and must not be forced into a monitoring label.

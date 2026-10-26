@@ -67,6 +67,10 @@ class VisualStreamTests(unittest.TestCase):
     def test_uncertain_report_keeps_context(self):
         m,s,r=self.push_row(flame='uncertain',smoke='uncertain',burning_material='uncertain',flame_relation='uncertain',description='Blurry.')
         self.assertEqual(r['assessment']['smoke'],'uncertain');self.assert_kept_after(m,s,r)
+    def test_unrequested_view_quality_is_a_validation_error_not_an_occlusion_finding(self):
+        row={k:v for k,v in ROW.items() if k!='occlusion'};m=Model();m.responses=[json.dumps({**row,'view_quality':'assessable'})+'<|im_end|>']
+        r=VisualSession(m,'source').push('image',{'ts_ms':1000,'sequence':1})
+        self.assertIsNone(r['assessment']);self.assertIsNotNone(r['validation_error']);self.assertEqual(m.cache,0)
     def test_special_tokens_only_trim_at_the_end_not_arbitrary_model_prose(self):
         m=Model();m.responses=['Here is your answer: '+json.dumps(ROW)];s=VisualSession(m,'source')
         self.assertIsNone(s.push('image',{'ts_ms':1000,'sequence':1})['assessment'])

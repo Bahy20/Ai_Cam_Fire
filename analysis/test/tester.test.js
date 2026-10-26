@@ -108,3 +108,44 @@ test('tester login lockout is per client, behind a global ceiling, and expires a
     assert.equal((await login(proxied,{ip:'10.0.0.9',code:'code'})).statusCode,200,'no header falls back to the socket address');
   }finally{await close();}
 });
+// A lighter flame at its tip: a lighter allowance or a hazard setting changes its priority, so it shows which policy applied.
+const lighter=ts=>({frame_id:`frame-${ts}`,flame:'present',smoke:'not_observed',burning_material:'not_observed',lighter:'present',
+  flame_relation:'at_tool_tip',occlusion:'not_observed',description:'A lighter flame at its tip.'});
+const lighterScene={
+  frameReader:(()=>{let ts=0;return {infer:async()=>({frame_wh:[640,480],visibility:'unknown'}),open:async()=>{ts=0;return {duration_s:4,frames:5};},
+    next:async()=>ts<=4000?{ts_ms:(ts+=1000)-1000,image_b64:'AQI='}:{eof:true,decoded_frames:5},closeVideo:async()=>{},close(){}};})(),
+  scout:{configured:true,analyze:async frames=>({mode:'fresh',assessment:{frames:frames.map(f=>lighter(f.ts_ms))}})},
+  nativeStreamFactory:({sessionId,onState,onResult})=>({open:async()=>onState('listening'),close(){},push:f=>onResult({session_id:sessionId,
+    engine:'minicpm-native-visual',native_chunks:1,source_ts_ms:f.ts_ms,assessment_source_ts_ms:f.ts_ms,text:'lighter',assessment:lighter(f.ts_ms)},f)})};
+// Priority reason of the first native report in a live session, opened with a tester cookie or the service bearer.
+async function livePolicy(app,headers){
+  const ws=new WebSocket(`ws://127.0.0.1:${app.server.address().port}/v1/live`,{headers});await once(ws,'open');const messages=[];
+  ws.on('message',raw=>messages.push(JSON.parse(raw)));ws.send(JSON.stringify({type:'start',camera_id:'test-camera',session_id:'policy'}));
+  const until=async check=>{for(let i=0;i<400&&!messages.some(check);i++)await new Promise(r=>setTimeout(r,5));return messages.find(check);};
+  await until(x=>x.type==='ready');ws.send(encodeFrame({session_id:'policy',sequence:1,ts_ms:Date.now()},Buffer.from([255,216,255,217])));
+  const result=await until(x=>x.trigger==='native_result');ws.close();await once(ws,'close');
+  for(let i=0;i<100&&(await app.inject('/health')).json().live_active;i++)await new Promise(r=>setTimeout(r,10));
+  return result?.priority.reason;
+}
+async function uploadPolicy(app,cookie){
+  const payload=Buffer.from('--b\r\nContent-Disposition: form-data; name="video"; filename="a.mp4"\r\n\r\n\0\0\0\x18ftypisom\r\n--b--\r\n','latin1');
+  const r=await app.inject({method:'POST',url:'/v1/videos',headers:{cookie,origin:'https://test.example','content-type':'multipart/form-data; boundary=b'},payload});
+  assert.equal(r.statusCode,202,r.body);await app.fireguard.waitForJobs();
+  return (await app.inject({url:`/v1/videos/${r.json().id}`,headers:{cookie}})).json().result.priority.reason;
+}
+test('testers have their own policy id: only listing tester changes their lighter or hazard policy',async()=>{
+  const cases=[[{},'uncontained_flame','uncontained_flame'],
+    [{expectedCameraIds:['test-camera'],hazardCameraIds:['test-camera']},'uncontained_flame','uncontained_flame'],
+    [{expectedCameraIds:['tester']},'lighter_evidence_pending','contained_lighter'],
+    [{hazardCameraIds:['tester']},'reviewed_site_hazard','reviewed_site_hazard']];
+  const {apps,close}=await testerServers(...cases.map(([policy])=>({...lighterScene,...policy,sleep:async()=>{}})));
+  try{
+    for(const [i,app] of apps.entries()){
+      const [policy,live,upload]=cases[i],label=JSON.stringify(policy);await app.listen({host:'127.0.0.1',port:0});
+      const cookie=(await login(app,{code:'code'})).headers['set-cookie'].split(';')[0];
+      assert.equal(await livePolicy(app,{cookie,origin:'https://test.example'}),live,`tester live ${label}`);
+      assert.equal(await uploadPolicy(app,cookie),upload,`tester upload ${label}`);
+    }
+    assert.equal(await livePolicy(apps[1],{authorization:'Bearer service'}),'reviewed_site_hazard','the operator test-camera keeps its own policy');
+  }finally{await close();}
+});

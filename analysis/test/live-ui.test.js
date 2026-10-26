@@ -31,3 +31,17 @@ test('operator review requires confirmation and keeps the evidence version the u
   const sent=requests.find(r=>r.path.includes('/review'));assert.equal(JSON.parse(sent.options.body).last_hazard_ts_ms,1000);
   assert.match(get('review-status').textContent,/new|latest|changed/i);
 });
+test('live labels use server times, so a skewed browser clock cannot hide a current report; error codes read as messages',()=>{
+  const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,{textContent:'',dataset:{},setAttribute(){}});return elements.get(id);};
+  const serverNow=Date.now();class Skewed extends Date{static now(){return serverNow+120000;}} // browser clock two minutes ahead
+  const context={document:{getElementById:get,createElement:()=>({getContext:()=>({})}),addEventListener(){}},window:{addEventListener(){}},
+    setInterval:()=>0,setTimeout:()=>0,clearTimeout(){},fetch:async()=>({ok:false,json:async()=>({})}),Date:Skewed};
+  vm.createContext(context);vm.runInContext(readFileSync(new URL('../src/public/testing.js',import.meta.url),'utf8'),context);
+  context.render('live',{emitted_at_ms:serverNow,priority:{level:'unknown'},native_stream:{state:'listening',assessment_status:'current',assessment_ts_ms:serverNow-1000,
+    assessment:{flame:'present',smoke:'not_observed',burning_material:'not_observed',description:'A lighter flame.'}}});
+  assert.match(get('live-native').textContent,/Flame: observed; smoke: not observed/);
+  const describe=code=>vm.runInContext(`describe(${JSON.stringify(code)})`,context);
+  assert.match(describe('video_too_large'),/250 MiB/);assert.match(describe('video_store_failed'),/could not save/);
+  assert.match(describe('invalid_jpeg_or_dimensions'),/could not be read/);assert.match(describe('frame_reader_exited'),/Frame checking/);
+  assert.equal(describe('some_new_code'),'some_new_code');
+});

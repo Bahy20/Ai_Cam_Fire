@@ -2,10 +2,42 @@ import {randomUUID} from 'node:crypto';
 import {qualifyModelInvestigation,scoutHandheldAssessmentApplies} from '../../worker/src/investigation.js';
 import {toInvestigation,MINICPM_MODEL,MINICPM_REVISION} from './minicpm.js';
 
-export const POLICY_VERSION='minicpm-only-v3';
-const AGE=10000,RECEIPT=5000,HAZARD_CONFIRM=2,HAZARD_CONFIRM_MS=20000,HAZARD_REFUTE=3,CLEAR_GAP=15000;
+export const POLICY_VERSION='minicpm-only-v4';
+const AGE=10000,RECEIPT=5000,HAZARD_CONFIRM=2,HAZARD_CONFIRM_MS=20000,HAZARD_CONFIRM_LOW_DETAIL_MS=40000,HAZARD_REFUTE=3,CLEAR_GAP=15000,MOTION_GAP=2000;
 const clearObservation=row=>['flame','smoke','burning_material','occlusion','flame_relation'].every(k=>row[k]==='not_observed');
 const hazardObservation=row=>row.smoke==='present'||row.burning_material==='present'||row.flame==='present'&&row.flame_relation==='separate';
+// Description/enum agreement. A field marked present whose description only negates it ("no smoke or flame visible",
+// "without any smoke", "smoke-free") is uncertain for policy: neither hazard nor clear evidence. The reverse (not_observed
+// but the word appears: "the smoke has cleared", "smoke detector") is never a contradiction; it would pin alarms on.
+// A present field the description never mentions is recorded as unsupported, nothing more.
+const TERMS={smoke:/^(?:smok(?:e|es|ed|y|ing)|haz(?:e|y)|plumes?|fumes?|mists?|misty|fog|foggy|vapou?rs?|steam(?:y|ing)?|sooty?|clouds?|cloudy)$/,
+  flame:/^(?:flam(?:e|es|ing)|fires?|burning|blaz(?:e|es|ing)|embers?|glow(?:s|ing)?)$/,
+  burning_material:/^(?:burning|burnt|burned|charred|smou?lder(?:s|ed|ing)?|fires?|flam(?:e|es|ing)|embers?)$/};
+const NEGATORS=new Set(['no','not','without','none','absent','never']);
+// Only words about existence (and other hazard terms) may stand between a negator and its term, so "no visible signs of
+// fire or smoke" negates both while "no one is near the burning paper" and "no thick smoke" (thin smoke?) negate nothing.
+const FILLERS=new Set(['any','visible','visibly','apparent','obvious','evident','noticeable','detectable','discernible','actual','real',
+  'sign','signs','trace','traces','indication','indications','evidence','hint','hints','of','or','nor']);
+export function descriptionCheck(row){
+  const fields=Object.keys(TERMS),seen=Object.fromEntries(fields.map(k=>[k,{affirmed:0,negated:0}]));
+  const terms=word=>fields.filter(k=>word.split('-').some(part=>TERMS[k].test(part)));
+  for(const clause of String(row.description??'').toLowerCase().replace(/[‘’]/g,"'").split(/[.;,]|\bbut\b/)){
+    const words=clause.match(/[a-z]+(?:['-][a-z]+)*/g)??[];
+    words.forEach((word,i)=>{
+      const hit=terms(word);if(!hit.length)return;
+      let negated=word.endsWith('-free');
+      for(let j=i-1;j>=0&&!negated;j--){const w=words[j];
+        if(NEGATORS.has(w)||w.endsWith("n't")||w==='of'&&words[j-1]==='free')negated=true;else if(!FILLERS.has(w)&&!terms(w).length)break;}
+      for(const k of hit)seen[k][negated?'negated':'affirmed']++;
+    });
+  }
+  const present=fields.filter(k=>row[k]==='present');
+  return {contradicted:present.filter(k=>seen[k].negated&&!seen[k].affirmed),unsupported:present.filter(k=>!seen[k].negated&&!seen[k].affirmed)};
+}
+// A contradicted flame cannot keep a relation that requires a present flame.
+const checkedRow=row=>{const {contradicted}=descriptionCheck(row);return contradicted.length?{...row,...Object.fromEntries(contradicted.map(k=>[k,'uncertain'])),
+  ...(contradicted.includes('flame')&&['at_tool_tip','separate'].includes(row.flame_relation)?{flame_relation:'uncertain'}:{})}:row;};
+const describeRows=(rows,frames)=>rows.map((row,i)=>({frame_id:frames[i].frame_id,...descriptionCheck(row),low_detail:frames[i].low_detail??null}));
 function lighterSupported(q,frames){
   const scene=q.scene_assessment;
   return scoutHandheldAssessmentApplies(scene,{frames,observations:q.observations,
@@ -28,7 +60,7 @@ export class VlmCoordinator {
     this.lastReview=previous?.incident_history?.last_review??null;
     this.connected=true;this.current=null;this.lastTs=null;this.receivedAt=null;this.invalid=false;
     this.generation=0;this.barrier=-Infinity;this.rows=[];this.images=[];this.scene=null;this.lastRow=null;
-    this.clearRows=[];this.lastAcceptedTs=-Infinity;this.pendingHazards=[];
+    this.clearRows=[];this.lastAcceptedTs=-Infinity;this.pendingHazards=[];this.motionSince=null;
     this.native={state:'connecting',started_at_ms:this.now(),assessment:null,assessment_ts_ms:null};
     this.inference=null;this.running=null;this.lastDispatch=-Infinity;this.lastAnalyzedTs=-Infinity;this.eof=false;
     store.start(sessionId,cameraId,mode);
@@ -52,11 +84,19 @@ export class VlmCoordinator {
     }
     if(this.lastTs!==null&&frame.ts_ms<=this.lastTs)return this.result();
     if(this.lastTs!==null&&frame.ts_ms-this.lastTs>2000)this.gap('observation_gap');
-    this.current=frame;this.lastTs=frame.ts_ms;this.receivedAt=this.now();
-    if(frame.visibility==='degraded'||frame.camera_motion===true){this.gap('view_degraded_or_moving');return this.result();}
+    // One moving frame (a nudged or handheld camera) is a skipped sample: never evidence or a native push, and results for
+    // the steady frames before it stay valid. Only motion on every frame for over 2 s makes the view unusable.
+    if(frame.camera_motion===true&&frame.visibility!=='degraded'){
+      this.lastTs=frame.ts_ms;this.motionSince??=frame.ts_ms;
+      if(frame.ts_ms-this.motionSince>MOTION_GAP){this.current=frame;this.receivedAt=this.now();this.gap('view_degraded_or_moving');}
+      else this.publish('frame');
+      return this.result();
+    }
+    this.motionSince=null;this.current=frame;this.lastTs=frame.ts_ms;this.receivedAt=this.now();
+    if(frame.visibility==='degraded'){this.gap('view_degraded_or_moving');return this.result();}
     this.invalid=false;this.gapReason=null;
     this.images=[...this.images,{frame_id:`frame-${frame.ts_ms}`,ts_ms:frame.ts_ms,frame_wh:frame.frame_wh,
-      roles:['recent'],image_b64:frame.image_b64}].filter(f=>f.ts_ms>=frame.ts_ms-8000).slice(-24);
+      roles:['recent'],image_b64:frame.image_b64,low_detail:typeof frame.low_detail==='boolean'?frame.low_detail:null}].filter(f=>f.ts_ms>=frame.ts_ms-8000).slice(-24);
     this.publish('frame');this.maybeAnalyze();return this.result();
   }
   gap(reason='capture_gap'){
@@ -74,7 +114,7 @@ export class VlmCoordinator {
   applyRows(rows,frames){
     toInvestigation({frames:rows},frames); // Validate the complete response before changing state.
     for(let i=0;i<rows.length;i++){
-      const row=rows[i],frame=frames[i],ts=frame.ts_ms;
+      const row=checkedRow(rows[i]),frame=frames[i],ts=frame.ts_ms;
       if(ts<=this.barrier||ts<=this.lastAcceptedTs||this.sourceNow()-ts>AGE||ts>this.sourceNow()||
         this.lastRow&&ts<=this.lastRow.frame.ts_ms){if(!clearObservation(row))this.clearRows=[];continue;}
       this.lastRow={row,frame};this.lastAcceptedTs=ts;
@@ -87,10 +127,12 @@ export class VlmCoordinator {
       // One model report can be a hallucination: entering the latch needs a second hazard report within 20 s. Pending
       // reports survive gaps, invalid/uncertain reports and reconnects; a clear streak of three reports dismisses them.
       // Once latched, every hazard report refreshes the alert so a review of older evidence is rejected.
+      // Blurry or grainy views are where the model reports smoke that is not there, so a pending report on a low-detail
+      // frame needs one more corroborating report. It still counts as evidence: such a hazard latches later, never not at all.
       const hazard=hazardObservation(row);
-      this.pendingHazards=[...this.pendingHazards,...(hazard?[{ts_ms:ts,frame_id:frame.frame_id}]:[])].filter(v=>ts-v.ts_ms<=HAZARD_CONFIRM_MS);
+      this.pendingHazards=[...this.pendingHazards,...(hazard?[{ts_ms:ts,frame_id:frame.frame_id,low_detail:frame.low_detail===true}]:[])].filter(v=>ts-v.ts_ms<=(v.low_detail?HAZARD_CONFIRM_LOW_DETAIL_MS:HAZARD_CONFIRM_MS));
       if(this.clearRows.length>=HAZARD_REFUTE)this.pendingHazards=[];
-      if(hazard&&(this.hazardLatch||this.pendingHazards.length>=HAZARD_CONFIRM)){
+      if(hazard&&(this.hazardLatch||this.pendingHazards.length>=this.hazardConfirmRequired())){
         this.hazardLatch=true;this.latestHazard={ts_ms:ts,frame_id:frame.frame_id,smoke:row.smoke,flame:row.flame,
           burning_material:row.burning_material,description:row.description};
         this.hazardSmoke||=row.smoke==='present';this.hazardFire||=row.flame==='present'||row.burning_material==='present';
@@ -131,12 +173,13 @@ export class VlmCoordinator {
       if(Number.isSafeInteger(ts)&&ts>this.barrier&&ts>this.lastAcceptedTs&&ts<=this.sourceNow()&&this.sourceNow()-ts<=AGE&&
         (!this.lastRow||ts>this.lastRow.frame.ts_ms)){
         const frame={frame_id:`frame-${ts}`,ts_ms:ts,frame_wh:report.frame_wh??this.current.frame_wh,
-          roles:['recent'],image_b64:image.jpeg.toString('base64')};
+          roles:['recent'],image_b64:image.jpeg.toString('base64'),low_detail:this.images.find(f=>f.ts_ms===ts)?.low_detail??null};
         try{
           this.applyRows([report.assessment],[frame]);applied=true;
           this.native.assessment=report.assessment;this.native.assessment_ts_ms=ts;
           this.inference={mode:'fresh',source:'modal',model:MINICPM_MODEL,revision:MINICPM_REVISION,engine:report.engine,
-            elapsed_ms:report.elapsed_ms,completed_at_ms:this.now(),purpose:'native_scene',validation_errors:[],frame_ids:[frame.frame_id],native_chunks:report.native_chunks};
+            elapsed_ms:report.elapsed_ms,completed_at_ms:this.now(),purpose:'native_scene',validation_errors:[],frame_ids:[frame.frame_id],native_chunks:report.native_chunks,
+            description_check:describeRows([report.assessment],[frame])};
           this.store.inference(this.sessionId,{...this.inference,raw:JSON.stringify(report.assessment),archive:this.store.archive(this.sessionId,[frame],{protect:this.hazardLatch})});
         }catch{this.native.validation_error='native_invalid_report';this.scene=null;this.lastRow=null;this.rows=[];this.clearRows=[];
           this.barrier=Math.max(this.barrier,this.sourceNow());}
@@ -159,7 +202,7 @@ export class VlmCoordinator {
       const metadata={mode:response.mode??'fresh',source:'modal',model:MINICPM_MODEL,revision:MINICPM_REVISION,
         purpose:'scene',frame_ids:frames.map(f=>f.frame_id),usage:response.usage??null,elapsed_ms:this.now()-started,completed_at_ms:this.now(),validation_errors:[]};
       // A translated prose observation cannot substitute for the strict per-image enums.
-      toInvestigation(response.assessment,frames);
+      toInvestigation(response.assessment,frames);metadata.description_check=describeRows(response.assessment.frames,frames);
       this.store.inference(this.sessionId,{...metadata,raw:String(response.provider_raw??'').slice(0,32768),archive});
       if(!this.connected||generation!==this.generation||!this.usable()||this.sourceNow()-frames[0].ts_ms>AGE){
         if(!response.assessment.frames.every(clearObservation))this.clearRows=[];return;}
@@ -172,6 +215,9 @@ export class VlmCoordinator {
       this.barrier=Math.max(this.barrier,this.sourceNow());this.publish('assessment_failed');
     }).finally(()=>{this.running=null;});
   }
+  // A low-detail report needs a third one and stays pending for 40 s, so a slow GPU (reports more than 10 s apart) can still
+  // confirm real smoke, which itself blurs the view.
+  hazardConfirmRequired(){return HAZARD_CONFIRM+(this.pendingHazards.some(v=>v.low_detail)?1:0);}
   priority(){
     const answer=(level,reason,label)=>({policy_version:POLICY_VERSION,scope:this.mode==='live'?'live':'observed_interval',level,reason,label});
     if(!this.connected)return answer('unknown','disconnected','Analysis connection unavailable');
@@ -195,7 +241,9 @@ export class VlmCoordinator {
     if(!row&&this.streaming&&this.native.validation_error)return answer('unknown','model_report_invalid','Live model report incomplete — waiting for a valid report');
     if(!row)return answer('unknown','assessment_required','Waiting for a current valid visual assessment');
     if(row.flame!=='present'&&(row.smoke==='present'||row.burning_material==='present'))
-      return answer('unknown','hazard_unconfirmed','Possible smoke or fire reported — confirming with the next observation');
+      return answer('unknown','hazard_unconfirmed',this.hazardConfirmRequired()>HAZARD_CONFIRM?
+        'Possible smoke or fire reported on a blurry or grainy view — confirming with further observations':
+        'Possible smoke or fire reported — confirming with the next observation');
     if(row.occlusion!=='not_observed')return answer('unknown','scene_uncertain','Scene unclear — review required');
     if(this.siteHazard&&row.flame==='present')return answer('escalate','reviewed_site_hazard','Flame in a hazardous location — inspect urgently');
     if(this.sceneCurrent()&&this.scene.negative)return answer('monitor','no_visual_hazard_observed','No flame or smoke observed in recent scene — monitor');
@@ -220,7 +268,8 @@ export class VlmCoordinator {
       incident_history:{unresolved:Boolean(this.incidentId),model_hazard:this.hazardLatch,smoke_confirmed:this.hazardSmoke,
         fire_confirmed:this.hazardFire,
         latest_hazard:this.latestHazard,last_review:this.lastReview,reviewable:this.mode==='live'&&this.connected&&this.hazardLatch,
-        clear_observations:this.clearRows.length,clear_required:8,clear_evidence_current:this.clearEvidenceCurrent()},
+        clear_observations:this.clearRows.length,clear_required:8,clear_evidence_current:this.clearEvidenceCurrent(),
+        hazard_reports:this.pendingHazards.length,hazard_reports_required:this.hazardConfirmRequired()},
       native_stream:this.streaming?{engine:'minicpm-native-visual',mode:'native_visual_stream',...this.native,startup_elapsed_ms:Math.max(0,this.now()-this.native.started_at_ms),
         assessment_status:fresh?'current':this.native.assessment?'expired':this.native.native_chunks?
           this.now()-(this.native.first_received_at_ms??this.now())>AGE?'not_reporting':'awaiting_report':'starting'}:null,

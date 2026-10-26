@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp,rm,readdir } from 'node:fs/promises';
+import { mkdtemp,rm,readdir,writeFile } from 'node:fs/promises';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -42,6 +43,21 @@ test('native evidence is withheld until pixel quality completes and rejects a de
     await new Promise(r=>setTimeout(r,25));assert.equal(forwarded,0,'unmeasured images must not enter native evidence');
     release({frame_wh:[640,480],visibility:'degraded'});await new Promise(r=>setTimeout(r,25));assert.equal(forwarded,0);
   }finally{release({frame_wh:[640,480],visibility:'degraded'});if(socket){socket.close();await once(socket,'close');}await app.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('a moving camera frame is not pushed as native evidence and does not gap the view',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-motion-native-'));const pushed=[];let clock=100000,motion=false;
+  const app=await buildServer({token:'test',dataDir:dir,scout:{configured:false},now:()=>clock,
+    frameReader:{infer:async()=>({frame_wh:[640,480],visibility:'unknown',camera_motion:motion}),close(){}},
+    nativeStreamFactory:()=>({open:async()=>{},push:frame=>{pushed.push(frame.ts_ms);},close(){}})});
+  let socket;try{
+    await app.listen({host:'127.0.0.1',port:0});socket=new WebSocket(`ws://127.0.0.1:${app.server.address().port}/v1/live`,{headers:{authorization:'Bearer test'}});
+    await once(socket,'open');const ready=once(socket,'message');socket.send(JSON.stringify({type:'start',camera_id:'test-camera',session_id:'motion'}));await ready;
+    const send=async(sequence,moving)=>{motion=moving;clock+=400;const message=once(socket,'message');
+      socket.send(encodeFrame({session_id:'motion',sequence,ts_ms:clock},Buffer.from([255,216,255,217])));return JSON.parse((await message)[0]);};
+    await send(1,false);const moved=await send(2,true);await send(3,false);
+    assert.deepEqual(pushed,[100400,101200],'only the steady frames are pushed');assert.equal(moved.view.status,'available_for_analysis');
+  }finally{if(socket){socket.close();await once(socket,'close');}await app.close();await rm(dir,{recursive:true,force:true});}
 });
 
 test('shutdown saves cancelled inference from an already disconnected live session',async()=>{
@@ -168,9 +184,9 @@ test('health reports the deployed policy version and build id',async()=>{
   delete process.env.FIREGUARD_BUILD_ID;
   const app=await buildServer({token:'test',dataDir:dir,store,frameReader:{close(){}},scout:{configured:false}});
   try{
-    let h=(await app.inject({url:'/health'})).json();assert.equal(h.policy_version,'minicpm-only-v3');assert.equal(h.build_id,null);
+    let h=(await app.inject({url:'/health'})).json();assert.equal(h.policy_version,'minicpm-only-v4');assert.equal(h.build_id,null);
     process.env.FIREGUARD_BUILD_ID='3f9c2a71be04';h=(await app.inject({url:'/health'})).json();
-    assert.equal(h.build_id,'3f9c2a71be04');assert.equal(h.policy_version,'minicpm-only-v3');
+    assert.equal(h.build_id,'3f9c2a71be04');assert.equal(h.policy_version,'minicpm-only-v4');
   }finally{
     if(previous===undefined)delete process.env.FIREGUARD_BUILD_ID;else process.env.FIREGUARD_BUILD_ID=previous;
     await app.close();store.close();await rm(dir,{recursive:true,force:true});
@@ -244,4 +260,145 @@ test('the store is pruned hourly when it supports pruning, harmlessly otherwise'
     t.mock.timers.tick(3600000);assert.equal(pruned,2);assert.equal(logged.length,1);assert.match(logged[0],/prune_failed/);
   }finally{console.error=error;await app.close();await plain.close();t.mock.timers.tick(3600000);assert.equal(pruned,2,'closing stops pruning');
     t.mock.timers.reset();await rm(dir,{recursive:true,force:true});}
+});
+const jpeg=Buffer.from([255,216,255,217]);
+const waitFor=async(check,label,ms=2000)=>{for(const end=Date.now()+ms;Date.now()<end&&!await check();)await new Promise(r=>setTimeout(r,5));assert.ok(await check(),label);};
+test('a live socket that stops answering pings is terminated and frees the live slot',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-ping-'));const opened=[];
+  // 150 ms pings leave room for event-loop stalls on a loaded machine; the assertions below are in ping periods.
+  const app=await buildServer({token:'test',dataDir:dir,livePingMs:150,scout:{configured:false},
+    frameReader:{infer:async()=>({frame_wh:[640,480],visibility:'unknown'}),close(){}}});
+  const start=async(options={})=>{
+    const ws=new WebSocket(`ws://127.0.0.1:${app.server.address().port}/v1/live`,{headers:{authorization:'Bearer test'},...options});
+    const id=`s${opened.push(ws)}`;await once(ws,'open');const reply=once(ws,'message');
+    ws.send(JSON.stringify({type:'start',camera_id:'cam',session_id:id}));assert.equal(JSON.parse((await reply)[0]).type,'ready');return [ws,id];
+  };
+  const idle=async()=>!(await app.inject('/health')).json().live_active;
+  try{
+    await app.listen({host:'127.0.0.1',port:0});
+    const [silent]=await start({autoPong:false}),started=Date.now();await once(silent,'close');
+    assert.ok(Date.now()-started<1000,'terminated after two missed pings');await waitFor(idle,'the dead socket released the live slot');
+    const [answering]=await start();await new Promise(r=>setTimeout(r,600));
+    assert.equal(answering.readyState,WebSocket.OPEN,'a client that answers pings stays connected while idle');
+    answering.close();await once(answering,'close');await waitFor(idle,'slot free');
+    // Frames prove liveness too, so a proxy that swallowed pings could not end a stream.
+    const [streaming,id]=await start({autoPong:false});let sequence=0;
+    const sender=setInterval(()=>streaming.send(encodeFrame({session_id:id,sequence:++sequence,ts_ms:Date.now()},jpeg)),20);
+    await new Promise(r=>setTimeout(r,600));clearInterval(sender);assert.equal(streaming.readyState,WebSocket.OPEN);
+  }finally{for(const ws of opened)ws.terminate();await app.close();await rm(dir,{recursive:true,force:true});}
+});
+test('a skewed client clock streams normally: frames carry capture time on the server clock downstream',async()=>{
+  for(const skew of [-600000,120000]){ // ten minutes behind, two minutes ahead
+    const dir=await mkdtemp(join(tmpdir(),'fire-skew-'));const t0=1760000000000;let clock=t0,socket;const inferred=[],pushed=[],messages=[];
+    const app=await buildServer({token:'test',dataDir:dir,now:()=>clock,scout:{configured:false},
+      frameReader:{infer:async(image,options)=>{inferred.push(options);return {frame_wh:[640,480],visibility:'unknown'};},close(){}},
+      nativeStreamFactory:()=>({open:async()=>{},push:f=>pushed.push([f.sequence,f.ts_ms]),close(){}})});
+    try{
+      await app.listen({host:'127.0.0.1',port:0});
+      socket=new WebSocket(`ws://127.0.0.1:${app.server.address().port}/v1/live`,{headers:{authorization:'Bearer test'}});await once(socket,'open');
+      socket.on('message',raw=>messages.push(JSON.parse(raw)));socket.send(JSON.stringify({type:'start',camera_id:'cam',session_id:'skew'}));
+      await waitFor(()=>messages.length,'ready');const session=messages[0].assessment_session_id;
+      for(let sequence=1;sequence<=3;sequence++){
+        clock+=400;socket.send(encodeFrame({session_id:'skew',sequence,ts_ms:clock+skew},jpeg));
+        const ts=clock;await waitFor(()=>messages.some(m=>m.type==='result'&&m.source_ts_ms===ts),`result for ${ts}`);
+      }
+      assert.deepEqual(messages.filter(m=>m.type==='error'),[],`skew ${skew}`);
+      assert.deepEqual(inferred,[400,800,1200].map(dt=>({stream:session,ts_ms:t0+dt})));
+      assert.deepEqual(pushed,[[1,t0+400],[2,t0+800],[3,t0+1200]],'native evidence keeps the client sequence and the server time');
+      // The client clock is still checked against itself: it must increase, and a frame 5 s later than the session's
+      // least-delayed one is stale.
+      clock+=400;socket.send(encodeFrame({session_id:'skew',sequence:4,ts_ms:t0+1200+skew},jpeg));
+      await waitFor(()=>messages.some(m=>m.error==='duplicate_or_reordered_frame'),'reordered client timestamp');
+      clock+=6000;socket.send(encodeFrame({session_id:'skew',sequence:5,ts_ms:t0+1201+skew},jpeg));
+      await waitFor(()=>messages.some(m=>m.error==='stale_frame'),'stale frame');
+      // A burst delayed 4 s in the network keeps its capture times, so it does not look fresh.
+      clock=t0+12000;socket.send(encodeFrame({session_id:'skew',sequence:6,ts_ms:t0+12000+skew},jpeg));
+      await waitFor(()=>messages.some(m=>m.type==='result'&&m.source_ts_ms===t0+12000),'steady frame');
+      clock=t0+17000;
+      for(const [sequence,captured] of [[7,13000],[8,13400],[9,13800]]){
+        socket.send(encodeFrame({session_id:'skew',sequence,ts_ms:t0+captured+skew},jpeg));
+        await waitFor(()=>messages.some(m=>m.type==='result'&&m.source_ts_ms===t0+captured),`delayed ${captured}`);
+      }
+      const delayed=messages.findLast(m=>m.type==='result');assert.equal(delayed.view.source_frame_age_ms,3200,'the burst shows its real age');
+      assert.deepEqual(pushed.slice(3),[[6,t0+12000],[7,t0+13000],[8,t0+13400],[9,t0+13800]]);
+    }finally{socket?.terminate();await app.close();await rm(dir,{recursive:true,force:true});}
+  }
+});
+test('live frame failures report the frame reader code, or frame_decode_failure for free text',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-reader-code-'));let clock=100000,socket;const messages=[];
+  const failures=['invalid_jpeg_or_dimensions','frame_reader_timeout',"'NoneType' object has no attribute 'shape'",`frame_${'x'.repeat(70)}`];
+  const app=await buildServer({token:'test',dataDir:dir,now:()=>clock,scout:{configured:false},
+    frameReader:{infer:async()=>{throw new Error(failures.shift());},close(){}}});
+  try{
+    await app.listen({host:'127.0.0.1',port:0});
+    socket=new WebSocket(`ws://127.0.0.1:${app.server.address().port}/v1/live`,{headers:{authorization:'Bearer test'}});await once(socket,'open');
+    socket.on('message',raw=>messages.push(JSON.parse(raw)));socket.send(JSON.stringify({type:'start',camera_id:'cam',session_id:'codes'}));
+    await waitFor(()=>messages.length,'ready');
+    for(let sequence=1;sequence<=4;sequence++){
+      clock+=400;socket.send(encodeFrame({session_id:'codes',sequence,ts_ms:clock},jpeg));
+      await waitFor(()=>messages.filter(m=>m.type==='error').length===sequence,`error ${sequence}`);
+    }
+    assert.deepEqual(messages.filter(m=>m.type==='error').map(m=>m.error),
+      ['invalid_jpeg_or_dimensions','frame_reader_timeout','frame_decode_failure','frame_decode_failure']);
+    assert.equal(messages.filter(m=>m.type==='result').at(-1).view.reason,'frame_decode_failure');
+  }finally{socket?.terminate();await app.close();await rm(dir,{recursive:true,force:true});}
+});
+test('upload failures return specific error codes and never wedge the upload slot',{timeout:20000},async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-upload-codes-'));const store=new Store(':memory:'),job=store.job.bind(store);let failStore=false;
+  store.job=(id,patch)=>{if(failStore&&patch?.status==='queued')throw new Error('database or disk is full');return job(id,patch);};
+  const app=await buildServer({token:'t',dataDir:dir,store,sleep:async()=>{},scout:{configured:false},uploadLimitBytes:64,
+    frameReader:{open:async()=>({duration_s:0,frames:0}),next:async()=>({eof:true,decoded_frames:0}),closeVideo:async()=>{},close(){}}});
+  const part=(name,filename,body)=>`--b\r\nContent-Disposition: form-data; name="${name}"${filename?`; filename="${filename}"`:''}\r\n\r\n${body}\r\n`;
+  const video=part('video','a.mp4','\0\0\0\x18ftypisom')+'--b--\r\n',multipartType='multipart/form-data; boundary=b';
+  const upload=async(payload,type=multipartType)=>{const r=await app.inject({method:'POST',url:'/v1/videos',
+    headers:{authorization:'Bearer t','content-type':type},payload:Buffer.from(payload,'latin1')});await app.fireguard.waitForJobs();return [r.statusCode,r.json().error];};
+  try{
+    assert.deepEqual(await upload(part('video','a.mp4','\0\0\0\x18ftypisom'+'x'.repeat(64))+'--b--\r\n'),[413,'video_too_large']);
+    assert.deepEqual(await upload('{}','application/json'),[400,'invalid_multipart']);
+    assert.deepEqual(await upload(part('note',null,'hi')+video),[400,'invalid_multipart'],'fields are not accepted');
+    assert.deepEqual(await upload('--b--\r\n'),[400,'video_required']);
+    assert.deepEqual(await upload(part('video','a.txt','text')+'--b--\r\n'),[415,'unsupported_video_format']);
+    failStore=true;assert.deepEqual(await upload(video),[500,'video_store_failed'],'a database write failure');failStore=false;
+    assert.deepEqual(await readdir(join(dir,'uploads')),[],'the stored file is removed');
+    assert.deepEqual(await upload(video),[202,undefined]);
+    // A body that ends inside the file part is refused, and the slot is free again for the next upload.
+    await app.listen({host:'127.0.0.1',port:0});const truncated=Buffer.from(part('video','a.mp4','\0\0\0\x18ftypisom').slice(0,-2),'latin1');
+    const s=net.connect(app.server.address().port,'127.0.0.1');let reply='';s.on('data',d=>{reply+=d;});s.on('error',()=>{});
+    s.write(`POST /v1/videos HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t\r\nContent-Type: ${multipartType}\r\nContent-Length: ${truncated.length}\r\n\r\n`);s.write(truncated);
+    await waitFor(()=>reply.includes('invalid_multipart'),'truncated upload refused',6000);s.destroy();
+    assert.match(reply,/^HTTP\/1.1 400 /);assert.deepEqual(await upload(video),[202,undefined]);
+    await rm(join(dir,'uploads'),{recursive:true});await writeFile(join(dir,'uploads'),'not a directory');
+    assert.deepEqual(await upload(video),[500,'video_store_failed'],'a filesystem failure');
+  }finally{await app.close();store.close();await rm(dir,{recursive:true,force:true});}
+});
+test('only uploads get the long request timeout; other requests must still arrive within the normal limit',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-request-timeout-'));const store=new Store(':memory:');
+  const app=await buildServer({token:'t',dataDir:dir,store,requestTimeoutMs:250,sleep:async()=>{},scout:{configured:false},
+    frameReader:{open:async()=>({duration_s:0,frames:0}),next:async()=>({eof:true,decoded_frames:0}),closeVideo:async()=>{},close(){}}});
+  // Sends the headers and half the body, then the rest after 400 ms; reports the status line and whether the server
+  // closed the connection before the rest was sent.
+  const slow=(path,headers,text)=>new Promise(resolve=>{
+    const body=Buffer.from(text,'latin1'),s=net.connect(app.server.address().port,'127.0.0.1');let data='',closed=false;
+    s.on('data',d=>{data+=d;});s.on('error',()=>{});s.on('close',()=>{closed=true;});
+    s.write(`POST ${path} HTTP/1.1\r\nHost: x\r\n${headers}Content-Length: ${body.length}\r\n\r\n`);s.write(body.subarray(0,body.length>>1));
+    setTimeout(()=>{const early=closed;if(!s.destroyed)s.write(body.subarray(body.length>>1));
+      setTimeout(()=>{s.destroy();resolve({status:data.split('\r\n')[0],early});},300);},400);
+  });
+  try{
+    assert.equal(app.server.requestTimeout,900000,'the server-wide limit fits a 250 MiB upload on a slow uplink');
+    await app.listen({host:'127.0.0.1',port:0});
+    const review=JSON.stringify({action:'false_alarm',incident_id:'x',last_hazard_ts_ms:null});
+    assert.deepEqual(await slow('/v1/live/x/review','Authorization: Bearer t\r\nContent-Type: application/json\r\n',review),{status:'',early:true});
+    assert.deepEqual(await slow('/v1/live/x/review','Content-Type: application/json\r\n',review),{status:'HTTP/1.1 401 Unauthorized',early:true},
+      'a refused request cannot hold the connection with a slow body');
+    const video='--b\r\nContent-Disposition: form-data; name="video"; filename="a.mp4"\r\n\r\n\0\0\0\x18ftypisom\r\n--b--\r\n';
+    const multipart='Content-Type: multipart/form-data; boundary=b\r\n';
+    assert.deepEqual(await slow('/v1/videos',multipart,video),{status:'HTTP/1.1 401 Unauthorized',early:true},
+      'an unauthenticated trickling upload is cut at the normal limit');
+    const first=slow('/v1/videos','Authorization: Bearer t\r\n'+multipart,video);await new Promise(r=>setTimeout(r,150));
+    assert.deepEqual(await slow('/v1/videos','Authorization: Bearer t\r\n'+multipart,video),{status:'HTTP/1.1 409 Conflict',early:true},
+      'an upload refused while the slot is held is cut at the normal limit');
+    assert.deepEqual(await first,{status:'HTTP/1.1 202 Accepted',early:false});
+    await app.fireguard.waitForJobs();
+  }finally{await app.close();store.close();await rm(dir,{recursive:true,force:true});}
 });

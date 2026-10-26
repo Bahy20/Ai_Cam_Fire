@@ -22,3 +22,10 @@ analysis/*.log
 *.db-*
 *.log
 _backups/
+
+# Webcam test set: track the labels and run history only (clips, exports and DB copies show the room)
+webcam-set/*
+!webcam-set/labels.json
+!webcam-set/reports/
+webcam-set/reports/*
+!webcam-set/reports/history.csv

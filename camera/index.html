@@ -20,7 +20,11 @@
 <script nonce="__CSP_NONCE__">
 const token='__CONTROL_TOKEN__';let cameraRunning=false,previewTimer=null,previewUrl=null;
 const $=id=>document.getElementById(id);let videoJob=null,jobTimer=null;
-const errorText=value=>({video_job_busy:'Another video is being analyzed. Try again when it finishes.',video_too_large:'The video exceeds the 250 MiB limit.',analysis_request_timed_out:'The request timed out. If the upload was accepted, it may still be processing.',analysis_service_unavailable:'The analysis service is unavailable. Please try again.',unauthorized:'The analysis service rejected authentication.'}[value]||value||'The request failed.');
+const errorText=value=>({video_job_busy:'Another video is being analyzed. Try again when it finishes.',video_too_large:'The video exceeds the 250 MiB limit.',
+  invalid_multipart:'The upload was incomplete or malformed. Please try again.',unsupported_video_format:'The file is not a supported MP4, MOV or AVI video.',
+  video_required:'Choose a video file to upload.',upload_storage_limit:'Upload storage is full. Try again later.',video_store_failed:'The analysis service could not save the video. Try again later.',
+  invalid_jpeg_or_dimensions:'A camera frame could not be read.',frame_decode_failure:'A camera frame could not be checked.',frame_reader_timeout:'Frame checking timed out.',
+  stale_frame:'Camera frames reached the analysis service late.',analysis_request_timed_out:'The request timed out. If the upload was accepted, it may still be processing.',analysis_service_unavailable:'The analysis service is unavailable. Please try again.',unauthorized:'The analysis service rejected authentication.'}[value]||value||'The request failed.');
 function uploadBusy(busy){$('analyze').disabled=busy;$('video-file').disabled=busy;}
 function showVideoResult(job){
   const r=job.result;$('video-result').hidden=false;$('video-details').textContent=JSON.stringify(job,null,2);
@@ -50,7 +54,7 @@ $('upload-form').onsubmit=event=>{
   if(!/\.(mp4|mov|avi)$/i.test(file.name)||file.size>250*1024*1024||file.size===0){$('upload-status').textContent='Choose a nonempty MP4, MOV or AVI file up to 250 MiB.';return;}
   clearTimeout(jobTimer);videoJob=null;uploadBusy(true);$('check-video').hidden=true;$('video-result').hidden=true;
   $('upload-progress').hidden=false;$('upload-progress').value=0;$('upload-status').textContent='Uploading video…';
-  const request=new XMLHttpRequest();request.open('POST','/videos');request.setRequestHeader('x-local-control',token);request.timeout=300000;
+  const request=new XMLHttpRequest();request.open('POST','/videos');request.setRequestHeader('x-local-control',token);request.timeout=960000;
   request.upload.onprogress=e=>{if(e.lengthComputable){const percent=Math.round(e.loaded/e.total*100);$('upload-progress').value=percent;$('upload-status').textContent=percent===100?'Upload sent; waiting for the analysis service…':`Uploading video… ${percent}%`;}};
   request.onload=()=>{try{const reply=JSON.parse(request.responseText);if(request.status!==202)throw new Error(errorText(reply.error||reply.detail));if(!reply.id)throw new Error('The analysis service returned no job ID.');videoJob=reply.id;$('upload-progress').hidden=true;void pollVideo();}catch(error){$('upload-status').textContent=error.message;uploadBusy(false);$('upload-progress').hidden=true;}};
   request.onerror=request.ontimeout=()=>{$('upload-status').textContent='Upload connection failed or timed out. Please try again.';uploadBusy(false);$('upload-progress').hidden=true;};
@@ -67,7 +71,7 @@ image.onload=()=>schedulePreview(30);image.onerror=()=>schedulePreview(500);setP
 async function poll(){try{const response=await fetch('/status',{headers:{'x-local-control':token},cache:'no-store'});
 if(response.status===403){document.querySelector('#connection').textContent='Reload this page to reconnect';return;}const s=await response.json();const r=s.result;
 document.querySelector('#connection').textContent=s.connection;
-document.querySelector('#info').textContent=s.error?`Status: ${s.error}`:`Captured ${s.captured_frames} frames · Sent ${s.sent_frames} for analysis`;
+document.querySelector('#info').textContent=s.error?`Status: ${errorText(s.error)}`:`Captured ${s.captured_frames} frames · Sent ${s.sent_frames} for analysis`;
 if(r){document.querySelector('#detection').textContent=`Flame: ${r.detection.fire.replaceAll('_',' ')} · Smoke: ${r.detection.smoke.replaceAll('_',' ')}`;
 const h=r.cause.hypothesis;
 const observed=[...(r.cause.observations||[])].reverse().find(o=>['material_burning','flame_visible','smoke_visible'].includes(o.kind));

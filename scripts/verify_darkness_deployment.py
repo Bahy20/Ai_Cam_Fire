@@ -1,5 +1,5 @@
 """Replay the supplied recording's camera region over real public WSS."""
-import asyncio,contextlib,io,json,time,uuid,sys
+import asyncio,bisect,contextlib,io,json,statistics,time,uuid,sys
 from pathlib import Path
 from collections import Counter
 import cv2,requests
@@ -7,12 +7,13 @@ from PIL import Image
 from websockets.asyncio.client import connect
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT))
 from camera.server import frame_packet
+from run_two_server import load_environment
 OUT=ROOT/'.hermes/darkness-20261024'
 
-async def replay(config,cookie):
+async def replay(config,cookie,expect_lighter):
     cap=cv2.VideoCapture(str(OUT/'camera-60-165s.mp4'));assert cap.isOpened()
     first=Image.open(OUT/'camera-140s.jpg').convert('RGB');first.thumbnail((640,480));buf=io.BytesIO();first.save(buf,format='JPEG',quality=80)
-    results=[];errors=[];frames={};ready_native=asyncio.Event();session=uuid.uuid4().hex;seq=0;last_ts=0
+    results=[];received=[];errors=[];frames={};ready_native=asyncio.Event();session=uuid.uuid4().hex;seq=0;last_ts=0
     async with connect(config['url'].replace('https:','wss:')+'/v1/live',origin=config['url'],
       additional_headers={'Cookie':cookie},open_timeout=180,close_timeout=5) as ws:
         await ws.send(json.dumps({'type':'start','camera_id':'test-camera','session_id':session}))
@@ -21,7 +22,7 @@ async def replay(config,cookie):
             async for raw in ws:
                 r=json.loads(raw)
                 if r.get('type')=='result':
-                    results.append(r)
+                    results.append(r);received.append(time.time_ns()//1000000)
                     if (r.get('native_stream') or {}).get('native_chunks',0)>0:ready_native.set()
                 elif r.get('type')=='error':errors.append(r)
         reader=asyncio.create_task(read())
@@ -55,15 +56,22 @@ async def replay(config,cookie):
     OUT.joinpath('deployed-user-replay.json').write_text(json.dumps({'input':'Camera crop from user Drive recording, original 60–165s; three FPS over WSS',
         'results':results,'errors':errors,'source_video_seconds_by_timestamp':frames},indent=2),encoding='utf-8')
     assert not errors,errors
-    scored=[r for r in results if frames.get(r.get('source_ts_ms')) is not None]
-    assert scored and all(r['priority']['policy_version']=='minicpm-only-v3' and r['detection']['source']=='minicpm' for r in scored)
+    # The gateway stamps frames with its own receive time, so server timestamps map back to sent frames through the clock
+    # offset seen on result delivery; the error is about one round trip, far below the seconds-scale windows checked here.
+    offset=statistics.median(r['emitted_at_ms']-t for r,t in zip(results,received) if r.get('emitted_at_ms'));sent=sorted(frames)
+    def video_s(ts,default=None):
+        if ts is None or not sent:return default
+        c=ts-offset;i=bisect.bisect_left(sent,c);best=min(sent[max(0,i-1):i+1],key=lambda s:abs(s-c))
+        return frames[best] if abs(best-c)<=1000 and frames[best] is not None else default
+    scored=[r for r in results if video_s(r.get('source_ts_ms')) is not None]
+    assert scored and all(r['priority']['policy_version']=='minicpm-only-v4' and r['detection']['source']=='minicpm' for r in scored)
     reports={r['native_stream']['assessment_ts_ms']:r['native_stream']['assessment'] for r in scored
              if (r.get('native_stream') or {}).get('assessment')}
-    mapped=[{'video_s':frames.get(ts),'row':row} for ts,row in reports.items() if frames.get(ts) is not None]
-    tail=[r for r in scored if frames.get(r['source_ts_ms'],0)>=145]
+    mapped=[{'video_s':video_s(ts),'row':row} for ts,row in reports.items() if video_s(ts) is not None]
+    tail=[r for r in scored if video_s(r['source_ts_ms'],0)>=145]
     summary={'results':len(scored),'native_steps':max(r['native_stream'].get('native_chunks',0) for r in scored),
       'valid_reports':len(mapped),'priority_counts':dict(Counter(r['priority']['reason'] for r in scored)),
-      'lighter_monitor_results':sum(r['priority']['reason']=='contained_lighter' for r in scored if 65<=frames.get(r['source_ts_ms'],0)<=90),
+      'lighter_monitor_results':sum(r['priority']['reason']=='contained_lighter' for r in scored if 65<=video_s(r['source_ts_ms'],0)<=90),
       'last_priority':scored[-1]['priority'],'last_detection':scored[-1]['detection'],
       'tail_current_smoke_detected':sum(r['detection']['smoke']=='detected' for r in tail),
       'tail_urgent_results':sum(r['priority']['level'] in ('inspect_urgently','escalate') for r in tail),
@@ -71,7 +79,9 @@ async def replay(config,cookie):
     OUT.joinpath('deployed-user-summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
     print(json.dumps({k:v for k,v in summary.items() if k!='reports'}),flush=True)
     assert len(mapped)>=10,'Native reports did not remain periodic'
-    assert summary['lighter_monitor_results']>0,'Lighter never received monitoring priority'
+    # Testers share the policy id 'tester', which gets the lighter downgrade only when listed in EXPECTED_LIGHTER_CAMERAS.
+    if expect_lighter:assert summary['lighter_monitor_results']>0,'Lighter never received monitoring priority'
+    else:assert summary['lighter_monitor_results']==0,'Testers got lighter monitoring without being listed'
     assert tail and summary['tail_current_smoke_detected']==0,'Historical smoke leaked into the current room view'
     assert summary['tail_urgent_results']==0,'Clear-room ending still produced urgent results'
 
@@ -80,6 +90,7 @@ def main():
     r=s.get(base+'/health',timeout=180);r.raise_for_status();h=r.json()
     assert h['live_vlm_mode']=='native_visual_stream' and not h['live_active'] and not h['video_job_active'] and h['yolo_enabled'] is False,h
     r=s.post(base+'/testing/login',headers={'Origin':base},json={'code':config['tester_code']},timeout=30);r.raise_for_status()
-    asyncio.run(replay(config,'; '.join(k+'='+v for k,v in s.cookies.items())))
+    expect_lighter='tester' in load_environment().get('EXPECTED_LIGHTER_CAMERAS','').split(',')
+    asyncio.run(replay(config,'; '.join(k+'='+v for k,v in s.cookies.items()),expect_lighter))
 
 if __name__=='__main__':main()
