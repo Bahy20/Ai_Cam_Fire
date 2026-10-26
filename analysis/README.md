@@ -10,10 +10,11 @@ Requires Node24 and Python3.11+. The CPU service needs OpenCV, NumPy, Pillow and
 
 ```powershell
 npm --prefix analysis ci
+.venv/Scripts/python.exe scripts/configure_modal.py
 .venv/Scripts/python.exe -m modal deploy deploy/modal_app.py
 ```
 
-Deployment uses the existing `fireguard-analysis-config` Modal secret and cached pinned MiniCPM model. Never put credentials in browser code. The hosted tester page is `/testing`; tester login issues a same-origin secure cookie. Service clients use `Authorization: Bearer <FIREGUARD_TOKEN>`. Public `/health` reports `yolo_enabled: false`, `detection_source: minicpm` and `live_vlm_mode: native_visual_stream`.
+Deployment uses two Modal secrets, `fireguard-analysis-config` and `fireguard-native-config`, and the cached pinned MiniCPM model. `scripts/configure_modal.py` creates or updates both secrets; run it before deploying, or the deploy fails while `fireguard-native-config` is missing (see `docs/modal-deployment.md`, Secrets). Never put credentials in browser code. The hosted tester page is `/testing`; tester login issues a same-origin secure cookie. Service clients use `Authorization: Bearer <FIREGUARD_TOKEN>`. Public `/health` reports `yolo_enabled: false`, `detection_source: minicpm` and `live_vlm_mode: native_visual_stream`.
 
 ## Video interfaces
 

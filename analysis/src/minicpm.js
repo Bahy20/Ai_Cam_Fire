@@ -33,6 +33,11 @@ export function toInvestigation(value,frames){
     hypothesis:{ignition_source:'unknown',ignition_tool:'unknown',fuel_type:'unknown',confidence:'low',action_frame_ids:[],ignition_frame_id:null}};
 }
 
+// The bridge keeps the Modal SDK's own MODAL_* settings (its credentials included) but none of the gateway's secrets.
+// A denylist, not an allowlist, so the SDK never loses a setting it reads.
+export function minicpmEnv(env=process.env) {
+  return Object.fromEntries(Object.entries(env).filter(([name,value])=>value!==undefined&&(/^MODAL_/i.test(name)||!/TOKEN|SECRET|CODE|KEY|PASSWORD/i.test(name))));
+}
 export class MiniCPM {
   constructor({requestImpl,python=process.env.FIREGUARD_PYTHON??resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python')}={}){
     Object.assign(this,{requestImpl,python});this.model=MINICPM_MODEL;this.source='modal';this.sceneOnly=true;
@@ -43,7 +48,7 @@ export class MiniCPM {
   request(args,{signal}){
     if(this.requestImpl)return this.requestImpl(args,{signal});
     if(!this.child){
-      const child=this.child=spawn(this.python,[resolve(root,'analysis/minicpm_client.py')],{cwd:root,stdio:['pipe','pipe','pipe'],windowsHide:true});
+      const child=this.child=spawn(this.python,[resolve(root,'analysis/minicpm_client.py')],{cwd:root,env:minicpmEnv(),stdio:['pipe','pipe','pipe'],windowsHide:true});
       const fail=()=>{if(this.child!==child)return;this.pending?.reject(new Error('minicpm_bridge_unavailable'));this.pending=null;this.child=null;};
       this.child.on('error',fail);this.child.on('exit',fail);this.child.stdin.on('error',fail);
       this.child.stderr.resume();

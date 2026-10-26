@@ -3,7 +3,7 @@ import websocket from '@fastify/websocket';
 import multipart from '@fastify/multipart';
 import { timingSafeEqual,randomUUID } from 'node:crypto';
 import { createWriteStream,readFileSync } from 'node:fs';
-import { mkdir,unlink,readdir,stat } from 'node:fs/promises';
+import { mkdir,unlink,readdir,stat,open as openFile } from 'node:fs/promises';
 import { join,resolve,extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
@@ -25,24 +25,38 @@ function authorized(request,token) {
   const actual=Buffer.from(request.headers.authorization??'');const expected=Buffer.from(`Bearer ${token}`);
   return actual.length===expected.length && timingSafeEqual(actual,expected);
 }
-export async function buildServer(options={}) {
-  const token=options.token??process.env.FIREGUARD_TOKEN;
+// The H100 bearer and the tester-cookie key fall back to the service token unless set separately (empty counts as unset).
+export function credentials(options={},env=process.env) {
+  const token=options.token??env.FIREGUARD_TOKEN;
   if(!token)throw new Error('FIREGUARD_TOKEN is required');
+  return {token,nativeToken:options.nativeToken||env.FIREGUARD_NATIVE_TOKEN||token,cookieSecret:options.cookieSecret||env.FIREGUARD_COOKIE_SECRET||token};
+}
+// Container signature each accepted extension must carry: an ISO-BMFF box type at bytes 4..7 or the RIFF/AVI header.
+// MP4 and MOV share one demuxer, and QuickTime-structured files may open with a non-ftyp atom under either name.
+const isoBox=h=>['ftyp','moov','mdat','wide','free','skip'].includes(h.toString('latin1',4,8));
+const signatures={'.mp4':isoBox,'.mov':isoBox,
+  '.avi':h=>h.toString('latin1',0,4)==='RIFF'&&h.toString('latin1',8,12)==='AVI '};
+async function header(path) {
+  const file=await openFile(path,'r');
+  try{const {buffer,bytesRead}=await file.read(Buffer.alloc(12),0,12,0);return buffer.subarray(0,bytesRead);}finally{await file.close();}
+}
+export async function buildServer(options={}) {
+  const {token,nativeToken,cookieSecret}=credentials(options);
   const dataDir=resolve(options.dataDir??process.env.FIREGUARD_DATA_DIR??join(root,'analysis-data'));
   const uploadDir=join(dataDir,'uploads');await mkdir(uploadDir,{recursive:true});
   const store=options.store??new Store(join(dataDir,'fireguard.sqlite'));
   const frameReader=options.frameReader??new FrameReader();const scout=options.analyzer??options.scout??new MiniCPM();
   const now=options.now??Date.now,sleep=options.sleep??delay;
   const nativeStreamFactory=options.nativeStreamFactory??(process.env.MINICPM_NATIVE_URL?
-    settings=>new NativeStream({url:process.env.MINICPM_NATIVE_URL,token,...settings}):null);
+    settings=>new NativeStream({url:process.env.MINICPM_NATIVE_URL,token:nativeToken,...settings}):null);
   const expected=new Set(options.expectedCameraIds??(process.env.EXPECTED_LIGHTER_CAMERAS??'').split(',').filter(Boolean));
   const hazards=new Set(options.hazardCameraIds??(process.env.HAZARDOUS_CAMERAS??'').split(',').filter(Boolean));
   const app=Fastify({logger:false,bodyLimit:MAX_MESSAGE,requestTimeout:120000,
     ...(options.https?{https:options.https}:{})});
   await app.register(websocket,{options:{maxPayload:MAX_MESSAGE,perMessageDeflate:false}});
   await app.register(multipart,{limits:{fileSize:250*1024*1024,files:1,fields:0,parts:1}});
-  const testers=testerAccess(app,{code:options.testerCode??process.env.TESTER_ACCESS_CODE,secret:token,
-    origin:options.testerOrigin??process.env.TESTER_PUBLIC_ORIGIN,now});
+  const testers=testerAccess(app,{code:options.testerCode??process.env.TESTER_ACCESS_CODE,secret:cookieSecret,
+    origin:options.testerOrigin??process.env.TESTER_PUBLIC_ORIGIN,trustProxy:options.trustProxy??process.env.FIREGUARD_TRUST_PROXY==='1',now});
   let live=null,activeJob=null,uploadReserved=false,closing=false;
   const sockets=new Set();
   const nativeStreams=new Set();
@@ -191,10 +205,12 @@ export async function buildServer(options={}) {
       if(total>750*1024*1024)return reply.code(507).send({error:'upload_storage_limit'});
       const part=await request.file();if(!part)return reply.code(400).send({error:'video_required'});
       const extension=extname(part.filename).toLowerCase();
-      if(!['.mp4','.mov','.avi'].includes(extension)){part.file.resume();return reply.code(415).send({error:'unsupported_video_format'});}
+      if(!Object.hasOwn(signatures,extension)){part.file.resume();return reply.code(415).send({error:'unsupported_video_format'});}
       const id=randomUUID();path=join(uploadDir,id+extension);
       await pipeline(part.file,createWriteStream(path,{flags:'wx'}));
       if(part.file.truncated)throw new Error('video_too_large');
+      // A renamed non-video file stops here; `path` is still set, so finally deletes it.
+      if(!signatures[extension](await header(path)))return reply.code(415).send({error:'unsupported_video_format'});
       store.job(id,{status:'queued',camera_id:cameraId,tester_id:request.testerSession?.id??null,filename:part.filename.slice(0,200),created_at_ms:now()});
       activeJob=runVideo(id,path,cameraId,request.testerSession?'test-camera':cameraId).finally(()=>{activeJob=null;});path=null;
       return reply.code(202).send({id,status:'queued',result_url:`/v1/videos/${id}`});

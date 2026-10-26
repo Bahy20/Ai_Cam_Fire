@@ -88,7 +88,7 @@ def main():
             except requests.RequestException:pass
             time.sleep(1)
         else:raise RuntimeError('analysis_server_not_ready')
-        if not health.get('scout_configured'):raise RuntimeError('Remote Scout credentials missing')
+        if not health.get('vlm_configured'):raise RuntimeError('MiniCPM is not configured')
         for path in sorted(args.video_dir.glob('*.mp4')):
             if args.only and path.name!=args.only:continue
             print('Uploading',path.name,flush=True)

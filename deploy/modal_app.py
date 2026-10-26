@@ -33,6 +33,9 @@ def gateway_build_id():
 app = modal.App('fireguard-analysis')
 volume = modal.Volume.from_name('fireguard-analysis-data', create_if_missing=True)
 secret = modal.Secret.from_name('fireguard-analysis-config', required_keys=['FIREGUARD_TOKEN'])
+# The H100 service holds only its own bearer, never the gateway config (service token, tester code, cookie secret).
+# Both are lazy references: nothing is looked up until deploy. scripts/configure_modal.py creates both.
+native_secret = modal.Secret.from_name('fireguard-native-config', required_keys=['FIREGUARD_NATIVE_TOKEN'])
 model_cache = modal.Volume.from_name('fireguard-minicpm-model-cache')
 vision_image = (
     modal.Image.debian_slim(python_version='3.11')
@@ -110,7 +113,7 @@ native_image=(vision_image
     .add_local_file(ROOT/'analysis/visual_stream.py','/app/analysis/visual_stream.py')
     .add_local_file(ROOT/'analysis/native_server.py','/app/analysis/native_server.py'))
 
-@app.cls(image=native_image,gpu='H100',cpu=4,memory=32768,volumes={'/models':model_cache},secrets=[secret],
+@app.cls(image=native_image,gpu='H100',cpu=4,memory=32768,volumes={'/models':model_cache},secrets=[native_secret],
          max_containers=1,min_containers=0,scaledown_window=60,timeout=900,startup_timeout=180)
 @modal.concurrent(max_inputs=3)
 class NativeLive:
@@ -131,7 +134,7 @@ class NativeLive:
         from analysis.visual_stream import VisualSession,ENGINE,MODE
         from analysis.native_server import create_app
         from analysis.minicpm_contract import MODEL_ID,MODEL_REVISION
-        return create_app(lambda sid:VisualSession(self.model,sid),os.environ['FIREGUARD_TOKEN'],
+        return create_app(lambda sid:VisualSession(self.model,sid),os.environ['FIREGUARD_NATIVE_TOKEN'],
             info={'model':MODEL_ID,'revision':MODEL_REVISION,'gpu':torch.cuda.get_device_name(),'context_token_limit':4096},
             inference_context=torch.inference_mode,engine=ENGINE,mode=MODE)
 
@@ -165,7 +168,8 @@ image = (
     .add_local_file(ROOT/'edge/image_quality.py', '/app/edge/image_quality.py')
 )
 
-@app.cls(image=image, secrets=[secret], volumes={'/persist':volume},
+# The gateway needs the native bearer too, to connect to NativeLive.
+@app.cls(image=image, secrets=[secret, native_secret], volumes={'/persist':volume},
          cpu=2, memory=4096, max_containers=1, min_containers=0,
          scaledown_window=1200, timeout=3600)
 @modal.concurrent(max_inputs=20)
@@ -178,7 +182,8 @@ class Analysis:
         import threading
         import time
         self.stop_event = threading.Event()
-        env = {**os.environ, 'FIREGUARD_PYTHON':sys.executable,
+        # Every request arrives through Modal's proxy, so the tester login limiter keys clients by X-Forwarded-For.
+        env = {**os.environ, 'FIREGUARD_PYTHON':sys.executable, 'FIREGUARD_TRUST_PROXY':'1',
                'MINICPM_NATIVE_URL':NativeLive().web.get_web_url()}
         self.process = subprocess.Popen(['node','analysis/src/modal-entry.js'], cwd='/app', env=env)
         # Node writes this marker after an alert-state snapshot so it reaches the volume without the periodic wait.

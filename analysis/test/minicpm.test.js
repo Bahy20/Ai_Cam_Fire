@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MiniCPM,toInvestigation,MINICPM_MODEL } from '../src/minicpm.js';
+import { MiniCPM,toInvestigation,MINICPM_MODEL,minicpmEnv } from '../src/minicpm.js';
 import {qualifyModelInvestigation} from '../../worker/src/investigation.js';
 import {lighterSupported} from '../src/priority.js';
 import {buildServer} from '../src/server.js';
@@ -80,4 +80,10 @@ test('superseding a running scene aborts its remote request',{timeout:1000},asyn
     await begun;current=false;
     await assert.rejects(result,/minicpm_job_superseded/);
   }finally{model.close();}
+});
+
+test('the MiniCPM bridge keeps Modal settings but drops gateway secrets',()=>{
+  const env=minicpmEnv({PATH:'/bin',MODAL_TOKEN_ID:'id',MODAL_TOKEN_SECRET:'s',MODAL_SERVER_URL:'u',FIREGUARD_TOKEN:'t',FIREGUARD_NATIVE_TOKEN:'n',
+    FIREGUARD_COOKIE_SECRET:'c',TESTER_ACCESS_CODE:'a',MINICPM_TIMEOUT:'9',UNSET:undefined});
+  assert.deepEqual(env,{PATH:'/bin',MODAL_TOKEN_ID:'id',MODAL_TOKEN_SECRET:'s',MODAL_SERVER_URL:'u',MINICPM_TIMEOUT:'9'});
 });

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { mkdtemp,rm } from 'node:fs/promises';
+import { mkdtemp,rm,readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
-import { buildServer } from '../src/server.js';
+import { buildServer,credentials } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { encodeFrame } from '../src/protocol.js';
 import { FrameReader } from '../src/frame-reader.js';
@@ -103,7 +103,7 @@ test('uploads without model evidence remain unknown and expose a timeline',async
       infer:async()=>({frame_wh:[640,480],visibility:'unknown',detections:[]}),closeVideo:async()=>{},close(){}},scout:{configured:false}});
   try {
     assert.equal((await app.inject({url:'/v1/videos/nope'})).statusCode,401);
-    const payload=Buffer.from('--boundary\r\nContent-Disposition: form-data; name="video"; filename="negative.mp4"\r\nContent-Type: video/mp4\r\n\r\nvideo\r\n--boundary--\r\n');
+    const payload=Buffer.from('--boundary\r\nContent-Disposition: form-data; name="video"; filename="negative.mp4"\r\nContent-Type: video/mp4\r\n\r\n\0\0\0\x18ftypisom\r\n--boundary--\r\n');
     const upload=await app.inject({method:'POST',url:'/v1/videos?camera_id=cam',headers:{authorization:'Bearer test-secret',
       'content-type':'multipart/form-data; boundary=boundary'},payload});
     assert.equal(upload.statusCode,202,upload.body);const {id}=upload.json();
@@ -113,6 +113,35 @@ test('uploads without model evidence remain unknown and expose a timeline',async
     assert.equal(result.result.priority.level,'unknown');assert.ok(result.timeline.length>=3);
     assert.deepEqual(result.inferences,[]);
   } finally{await app.close();store.close();await rm(dir,{recursive:true,force:true});}
+});
+test('uploads are refused and deleted unless the container signature matches the extension',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-signature-'));const store=new Store(':memory:');
+  const app=await buildServer({token:'t',dataDir:dir,store,sleep:async()=>{},scout:{configured:false},
+    frameReader:{open:async()=>({duration_s:0,frames:0}),next:async()=>({eof:true,decoded_frames:0}),closeVideo:async()=>{},close(){}}});
+  const upload=(filename,bytes)=>app.inject({method:'POST',url:'/v1/videos',headers:{authorization:'Bearer t','content-type':'multipart/form-data; boundary=b'},
+    payload:Buffer.concat([Buffer.from(`--b\r\nContent-Disposition: form-data; name="video"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`),
+      Buffer.from(bytes,'latin1'),Buffer.from('\r\n--b--\r\n')])});
+  try{
+    for(const [name,bytes] of [['a.mp4','<html>ftyp'],['a.mp4','ftyp'],['a.mp4',''],['a.mov','\0\0\0\x08junkjunk'],
+      ['a.avi','RIFF\0\0\0\0WAVEfmt '],['a.avi','\0\0\0\x18ftypisom'],['a.avi','RIFF']]){
+      const r=await upload(name,bytes);assert.equal(r.statusCode,415,`${name} ${JSON.stringify(bytes)}`);assert.deepEqual(r.json(),{error:'unsupported_video_format'});
+    }
+    assert.deepEqual(await readdir(join(dir,'uploads')),[],'refused uploads are deleted');
+    for(const [name,bytes] of [['a.mp4','\0\0\0\x18ftypisom'],['a.MOV','\0\0\0\x14ftypqt  '],['a.mov','\0\0\0\x08wide'],['a.mov','\0\0\0\x08mdat'],['a.mp4','\0\0\0\x08moov'],
+      ['a.avi','RIFF\x24\0\0\0AVI LIST']]){
+      const r=await upload(name,bytes);assert.equal(r.statusCode,202,`${name}: ${r.body}`);await app.fireguard.waitForJobs();
+      assert.equal(store.job(r.json().id).status,'complete');
+    }
+  }finally{await app.close();store.close();await rm(dir,{recursive:true,force:true});}
+});
+test('native and cookie credentials fall back to the service token unless set separately',()=>{
+  const all=value=>({token:value,nativeToken:value,cookieSecret:value});
+  assert.deepEqual(credentials({token:'svc'},{}),all('svc'),'a deployment with only FIREGUARD_TOKEN keeps working');
+  assert.deepEqual(credentials({},{FIREGUARD_TOKEN:'svc',FIREGUARD_NATIVE_TOKEN:'',FIREGUARD_COOKIE_SECRET:''}),all('svc'),'empty values count as unset');
+  assert.deepEqual(credentials({},{FIREGUARD_TOKEN:'svc',FIREGUARD_NATIVE_TOKEN:'gpu',FIREGUARD_COOKIE_SECRET:'jar'}),{token:'svc',nativeToken:'gpu',cookieSecret:'jar'});
+  assert.deepEqual(credentials({token:'a',nativeToken:'b',cookieSecret:'c'},{FIREGUARD_TOKEN:'x',FIREGUARD_NATIVE_TOKEN:'y',FIREGUARD_COOKIE_SECRET:'z'}),
+    {token:'a',nativeToken:'b',cookieSecret:'c'},'options override the environment');
+  assert.throws(()=>credentials({},{FIREGUARD_NATIVE_TOKEN:'gpu',FIREGUARD_COOKIE_SECRET:'jar'}),/FIREGUARD_TOKEN is required/);
 });
 test('health shows a crash-looping frame reader through restarts and the last failure, not availability',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'fire-health-'));const store=new Store(':memory:');

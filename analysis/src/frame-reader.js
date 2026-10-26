@@ -3,6 +3,14 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 const root=fileURLToPath(new URL('../../',import.meta.url));
+// The Python worker needs no credentials: it inherits only what the interpreter and native libraries read
+// (names matched case-insensitively, as on Windows), never a name that looks like a secret.
+const childEnvNames=new Set(['PATH','SYSTEMROOT','TEMP','TMP','TMPDIR','HOME','USERPROFILE','LANG','LC_ALL',
+  'PYTHONUNBUFFERED','PYTHONPATH','OMP_NUM_THREADS','VIRTUAL_ENV']);
+export function childEnv(env=process.env) {
+  return Object.fromEntries(Object.entries(env).filter(([name,value])=>value!==undefined&&childEnvNames.has(name.toUpperCase())&&
+    !/TOKEN|SECRET|CODE|KEY|PASSWORD/i.test(name)));
+}
 // One Python worker serves live quality checks and video decoding. A failed worker (timeout, exit, protocol or pipe
 // error) rejects only its own in-flight requests and is replaced lazily on the next request; `closed` is set by close() only.
 // So `closed` cannot show a crash loop: `restarts` counts respawns after the first spawn and `lastFailure` keeps the most
@@ -19,7 +27,7 @@ export class FrameReader {
   // stderr stays unguarded on purpose: a dying worker's traceback is the most useful diagnostics text.
   start(){
     this.restartTimer=null;if(this.closed)return;if(this.spawnedAt>-Infinity)this.restarts++;this.spawnedAt=Date.now();let child;
-    try{child=this.child=this.spawnChild(this.python,[this.script],{cwd:root,stdio:['pipe','pipe','pipe'],windowsHide:true});}
+    try{child=this.child=this.spawnChild(this.python,[this.script],{cwd:root,env:childEnv(),stdio:['pipe','pipe','pipe'],windowsHide:true});}
     catch{this.child=null;return this.fail(null,'frame_reader_start_failed');}
     child.stderr.on('data',bytes=>{this.diagnostics=(this.diagnostics+bytes.toString()).slice(-4096);});
     createInterface({input:child.stdout}).on('line',line=>{

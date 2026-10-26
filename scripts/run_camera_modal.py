@@ -25,7 +25,7 @@ def main():
     env['CAMERA_PORT']=str(args.port)
     print('Warming Modal analysis service...',flush=True)
     health=requests.get(url+'/health',timeout=180);health.raise_for_status()
-    if not health.json().get('scout_configured'):raise SystemExit('Scout credentials are missing on Modal')
+    if not health.json().get('vlm_configured'):raise SystemExit('MiniCPM is not configured on Modal')
     auth=requests.get(url+'/v1/videos/auth-check',headers={'Authorization':'Bearer '+env['FIREGUARD_TOKEN']},timeout=30)
     if auth.status_code!=404:raise SystemExit('Remote service authentication failed')
     print(f'Camera controls: http://127.0.0.1:{args.port} (analysis on Modal)',flush=True)

@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, PlainTextResponse
 
 CAPTURE_FPS=30
 TRANSMIT_FPS=10
@@ -22,6 +22,21 @@ TRANSMIT_FPS=10
 def valid_analysis_url(value):
     parsed=urlparse(value)
     return parsed.scheme=='wss' or parsed.scheme=='ws' and parsed.hostname in ('127.0.0.1','localhost','::1')
+
+def local_hosts(port):
+    hosts={f'{name}:{port}' for name in ('127.0.0.1','localhost','[::1]')}
+    return hosts|{'127.0.0.1','localhost','[::1]'} if port==80 else hosts
+
+class LocalHostOnly:
+    # DNS rebinding guard: a hostile site's name resolving to 127.0.0.1 still sends its own Host header.
+    def __init__(self,app,allowed):self.app=app;self.allowed=frozenset(allowed)
+    async def __call__(self,scope,receive,send):
+        if scope['type'] in ('http','websocket'):
+            hosts=[value for key,value in scope['headers'] if key==b'host']
+            if len(hosts)!=1 or hosts[0].decode('latin-1').lower() not in self.allowed:
+                if scope['type']=='websocket':return await send({'type':'websocket.close','code':1008})
+                return await PlainTextResponse('invalid_host',status_code=421)(scope,receive,send)
+        await self.app(scope,receive,send)
 
 def frame_packet(session,sequence,ts_ms,jpeg):
     meta=json.dumps({'session_id':session,'sequence':sequence,'ts_ms':ts_ms},separators=(',',':')).encode()
@@ -118,27 +133,33 @@ class CaptureService:
         self.connection='stopped'
         if self.result:self.result={**self.result,'priority':{'level':'unknown','label':'Camera stopped'}}
 
-def create_app(service,http_transport=None):
+def create_app(service,http_transport=None,port=8001):
     remote=urlparse(service.url)
     http_base=('https' if remote.scheme=='wss' else 'http')+'://'+remote.netloc
     @asynccontextmanager
     async def lifespan(app):
         yield
         await service.stop()
-    app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None)
+    app=FastAPI(lifespan=lifespan,docs_url=None,redoc_url=None);app.add_middleware(LocalHostOnly,allowed=local_hosts(port))
     @app.get('/',response_class=HTMLResponse)
-    async def page():return (Path(__file__).with_name('index.html').read_text(encoding='utf-8')
-                             .replace('__CONTROL_TOKEN__',service.ui_token)
-                             .replace('__HTTP_ENDPOINT__',html.escape(http_base+'/v1/videos')))
+    async def page():
+        nonce=secrets.token_urlsafe(16)
+        csp=(f"default-src 'self'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; img-src 'self' blob: data:; "
+             "connect-src 'self'; frame-ancestors 'none'")
+        return HTMLResponse(Path(__file__).with_name('index.html').read_text(encoding='utf-8')
+                            .replace('__CSP_NONCE__',nonce).replace('__CONTROL_TOKEN__',service.ui_token)
+                            .replace('__HTTP_ENDPOINT__',html.escape(http_base+'/v1/videos')),
+                            headers={'Cache-Control':'no-store','X-Frame-Options':'DENY','Content-Security-Policy':csp})
+    def authorize(request):
+        if not secrets.compare_digest(request.headers.get('x-local-control',''),service.ui_token):raise HTTPException(403,'local_control_required')
     @app.get('/status')
-    async def status():return service.status()
+    async def status(request:Request):authorize(request);return service.status()
     @app.get('/preview.jpg')
-    async def preview():
+    async def preview(request:Request):
+        authorize(request)
         with service.lock:frame=service.latest
         if not frame:return Response(status_code=204)
         return Response(frame[2],media_type='image/jpeg',headers={'Cache-Control':'no-store'})
-    def authorize(request):
-        if not secrets.compare_digest(request.headers.get('x-local-control',''),service.ui_token):raise HTTPException(403,'local_control_required')
     async def proxy(method,path,content=None,content_type=None,params=None,content_length=None):
         headers={'Authorization':'Bearer '+service.token}
         if content_type:headers['content-type']=content_type
@@ -164,11 +185,10 @@ def create_app(service,http_transport=None):
         limit=250*1024*1024+64*1024
         length=request.headers.get('content-length')
         if length is None:raise HTTPException(411,'content_length_required')
-        if length:
-            try:size=int(length)
-            except ValueError:raise HTTPException(400,'invalid_content_length')
-            if size<0:raise HTTPException(400,'invalid_content_length')
-            if size>limit:raise HTTPException(413,'video_too_large')
+        try:size=int(length)
+        except ValueError:raise HTTPException(400,'invalid_content_length')
+        if size<0:raise HTTPException(400,'invalid_content_length')
+        if size>limit:raise HTTPException(413,'video_too_large')
         async def chunks():
             received=0
             async for chunk in request.stream():
@@ -201,5 +221,6 @@ def main():
     token=os.environ.get('FIREGUARD_TOKEN')
     if not token:raise SystemExit('FIREGUARD_TOKEN is required')
     service=CaptureService(os.environ.get('ANALYSIS_WS_URL','ws://127.0.0.1:8002/v1/live'),token,os.environ.get('CAMERA_ID','test-camera'))
-    uvicorn.run(create_app(service),host='127.0.0.1',port=int(os.environ.get('CAMERA_PORT','8001')),log_level='warning')
+    port=int(os.environ.get('CAMERA_PORT','8001'))
+    uvicorn.run(create_app(service,port=port),host='127.0.0.1',port=port,log_level='warning')
 if __name__=='__main__':main()

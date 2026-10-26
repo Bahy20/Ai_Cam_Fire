@@ -34,7 +34,7 @@ $env:PYTHONIOENCODING='utf-8'
 .venv\Scripts\python.exe -m modal deploy deploy/modal_app.py
 ```
 
-The credential script creates/updates only `fireguard-analysis-config`. The image uploads only selected source directories, dependency manifests and `detector/fire_seg.pt`. It excludes camera recordings, local env files, client credentials and results.
+The credential script creates/updates only `fireguard-analysis-config` and `fireguard-native-config` (see Secrets). The image uploads only selected source directories, dependency manifests and `detector/fire_seg.pt`. It excludes camera recordings, local env files, client credentials and results.
 
 Record the printed HTTPS origin as `url` in ignored `analysis/.modal-client.json`, alongside the generated `token`. Do not put the token in URLs or shell command arguments. Start the camera bridge:
 
@@ -45,6 +45,10 @@ Record the printed HTTPS origin as `url` in ignored `analysis/.modal-client.json
 The launcher warms the remote service and checks authentication before opening the local UI server. Click Start camera to begin capture. Stop the old two-server launcher first if it occupies port 8001. `--port 8003` permits a separate camera control server.
 
 To test a recording from the website, use **Analyze a recorded video** below the live camera controls: choose an MP4/MOV/AVI and click **Analyze video**. The page shows upload progress, polls the remote job, then displays detection, possible cause, operator priority and the JSON response. Scout failures appear as an incomplete-assessment warning. The local server forwards the file to Modal's `/v1/videos` endpoint and keeps the bearer token out of browser code. Multipart uploads retain their content length because Modal's proxy rejects chunked uploads.
+
+## Secrets
+
+`FIREGUARD_TOKEN` is now only the service-client bearer. The gateway reaches the H100 native service with `FIREGUARD_NATIVE_TOKEN`, held in its own Modal secret `fireguard-native-config` (the only secret `NativeLive` receives), and signs tester cookies with `FIREGUARD_COOKIE_SECRET` in `fireguard-analysis-config`. `scripts/configure_modal.py` generates both once and keeps them in ignored `analysis/.modal-client.json` (`native_token`, `cookie_secret`); it never prints them. Run it before the next deploy: the deploy fails until `fireguard-native-config` exists. Either value left unset falls back to `FIREGUARD_TOKEN`. Saved values win over `.env.local`: a value there is used only when the JSON file has none. To rotate one, delete its key (`native_token` or `cookie_secret`) from `analysis/.modal-client.json`, rerun the script and deploy. Rotating the cookie secret (or the first deploy that introduces it) signs every tester out; they sign in again with the same tester code. The frame-reader Python worker gets a minimal environment with no credentials.
 
 ## Sharing with testers
 

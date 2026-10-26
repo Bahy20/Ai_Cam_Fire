@@ -5,7 +5,7 @@ import { spawn,execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
-import { FrameReader } from '../src/frame-reader.js';
+import { FrameReader,childEnv } from '../src/frame-reader.js';
 
 const ready={ready:true,mode:'pixel_quality_only'};
 const jpeg=python=>execFileSync(python,['-c',"import io,base64,sys;from PIL import Image;b=io.BytesIO();Image.new('RGB',(64,48),(90,120,150)).save(b,'JPEG');sys.stdout.write(base64.b64encode(b.getvalue()).decode())"]).toString();
@@ -95,4 +95,21 @@ test('a crash loop counts every restart and keeps the last failure while the rea
     assert.equal(broken.lastFailure.code,'frame_reader_start_failed');assert.equal(broken.restarts,0);
     await assert.rejects(broken.warmup(),{message:'frame_reader_start_failed'});assert.equal(broken.restarts,1);assert.equal(broken.closed,false);
   }finally{broken.close();}
+});
+
+test('the Python worker environment keeps interpreter variables and drops every credential',async()=>{
+  const env={PATH:'/usr/bin',Path:'C:\\Windows',SystemRoot:'C:\\Windows',HOME:'/home/u',LANG:'C.UTF-8',PYTHONPATH:'/app',OMP_NUM_THREADS:'2',TEMP:undefined,
+    FIREGUARD_TOKEN:'t',FIREGUARD_NATIVE_TOKEN:'n',FIREGUARD_COOKIE_SECRET:'c',TESTER_ACCESS_CODE:'code',CLOUDFLARE_API_TOKEN:'cf',
+    MODAL_TOKEN_SECRET:'m',AWS_ACCESS_KEY_ID:'k',DB_PASSWORD:'p',MINICPM_NATIVE_URL:'wss://gpu.example',TESTER_PUBLIC_ORIGIN:'https://x.example'};
+  assert.deepEqual(childEnv(env),{PATH:'/usr/bin',Path:'C:\\Windows',SystemRoot:'C:\\Windows',HOME:'/home/u',LANG:'C.UTF-8',PYTHONPATH:'/app',OMP_NUM_THREADS:'2'});
+  const names=['FIREGUARD_TOKEN','TESTER_ACCESS_CODE'],saved=names.map(name=>process.env[name]);
+  for(const name of names)process.env[name]='must-not-leak';
+  // A worker that reports what it inherited, so the check covers the spawned child itself.
+  const report="require('readline').createInterface({input:process.stdin}).on('line',l=>process.stdout.write(JSON.stringify({id:JSON.parse(l).id,"+
+    "result:{token:process.env.FIREGUARD_TOKEN??null,code:process.env.TESTER_ACCESS_CODE??null,path:process.env.PATH??null}})+'\\n'))";
+  const reader=new FrameReader({spawn:(cmd,args,opts)=>spawn(process.execPath,['-e',report],opts)});
+  try{
+    assert.ok(childEnv().PATH);assert.equal(childEnv().FIREGUARD_TOKEN,undefined);
+    assert.deepEqual(await reader.warmup(),{token:null,code:null,path:process.env.PATH});
+  }finally{reader.close();names.forEach((name,i)=>{if(saved[i]===undefined)delete process.env[name];else process.env[name]=saved[i];});}
 });
