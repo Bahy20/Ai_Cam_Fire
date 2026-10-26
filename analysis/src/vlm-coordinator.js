@@ -1,5 +1,5 @@
 import {randomUUID} from 'node:crypto';
-import {qualifyModelInvestigation,scoutHandheldAssessmentApplies} from '../../worker/src/investigation.js';
+import {qualifyModelInvestigation,scoutHandheldAssessmentApplies} from '../shared/investigation.js';
 import {toInvestigation,MINICPM_MODEL,MINICPM_REVISION} from './minicpm.js';
 
 export const POLICY_VERSION='minicpm-only-v4';
@@ -38,7 +38,7 @@ export function descriptionCheck(row){
 const checkedRow=row=>{const {contradicted}=descriptionCheck(row);return contradicted.length?{...row,...Object.fromEntries(contradicted.map(k=>[k,'uncertain'])),
   ...(contradicted.includes('flame')&&['at_tool_tip','separate'].includes(row.flame_relation)?{flame_relation:'uncertain'}:{})}:row;};
 const describeRows=(rows,frames)=>rows.map((row,i)=>({frame_id:frames[i].frame_id,...descriptionCheck(row),low_detail:frames[i].low_detail??null}));
-function lighterSupported(q,frames){
+export function lighterSupported(q,frames){
   const scene=q.scene_assessment;
   return scoutHandheldAssessmentApplies(scene,{frames,observations:q.observations,
     ts_ms:scene.evidence_interval?.end_ts_ms,evidence_current:true,chronological_match:true,

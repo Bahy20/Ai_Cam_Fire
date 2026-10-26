@@ -2,7 +2,7 @@
 
 Native webcam streaming is described in [native streaming](native-streaming.md). The independent image-batch implementation below remains the recorded-upload path; live sessions now have a separate persistent native GPU WSS service when `MINICPM_NATIVE_URL` is configured.
 
-The active analysis backend defaults to MiniCPM-o 4.5 (`openbmb/MiniCPM-o-4_5`, revision `d59117d19ddb8a28a62f1b5f4e3b34ac48d510a4`). The existing hosted URL, upload API and WSS protocol remain the same. The retained Scout adapter is legacy code and is not instantiated by the default server.
+The active analysis backend defaults to MiniCPM-o 4.5 (`openbmb/MiniCPM-o-4_5`, revision `d59117d19ddb8a28a62f1b5f4e3b34ac48d510a4`). The existing hosted URL, upload API and WSS protocol remain the same. The old Scout adapter is archived under `legacy/analysis/` and is not used.
 
 `deploy/modal_app.py` contains a private `Vision` class: one maximum L40S, zero minimum containers, 120-second idle timeout and a dedicated cached-model Volume. It has no public HTTP inference endpoint and receives no service or Cloudflare secrets. Recorded uploads call it using Modal's authenticated Python SDK over a bounded JSON bridge. An upload warms that model before starting its recorded timeline. When native streaming is enabled, CPU startup does not start the separate batch GPU. The first live connection starts the native GPU and the page shows its connecting state. A later idle cold start may delay an assessment; stale results do not gain authority. GPU inference consumes the existing Modal allowance/credits, and actual remaining balance is unverified.
 

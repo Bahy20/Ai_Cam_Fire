@@ -48,7 +48,7 @@ npm --prefix analysis test
 .venv/Scripts/python.exe scripts/verify_model_only_upload.py
 ```
 
-The deployment verification scripts use private local configuration without printing credentials. They make real public GPU calls. Historical detector/Worker tests are retained separately from the active model-only product. See `docs/model-only-analysis.md` for fresh deployment evidence and limitations.
+The deployment verification scripts use private local configuration without printing credentials. They make real public GPU calls. The retired detector/Worker code and its tests are archived under `legacy/` and are not part of this product. See `docs/model-only-analysis.md` for fresh deployment evidence and limitations.
 
 ## Webcam test set
 

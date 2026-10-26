@@ -130,7 +130,7 @@ class VideoReader:
     def close(self):self.cap.release()
 
 def main():
-    from edge.image_quality import assess_frame_quality
+    from analysis.shared.image_quality import assess_frame_quality
     video=None;motion=MotionTracker()
     for line in sys.stdin:
         request={}

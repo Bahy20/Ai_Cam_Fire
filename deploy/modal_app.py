@@ -4,18 +4,13 @@ import modal
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# analysis/src files the gateway image leaves out (legacy coordinator). Root-relative names, as add_local_dir's
-# dockerignore-style matcher reads them; shared with gateway_files() so the build id hashes what ships.
-GATEWAY_SRC_IGNORE = ['coordinator.js', 'priority.js', 'scout.js']
-
 def gateway_files():
     """Every local file the gateway `image` below uploads; keep in step with its add_local_* calls."""
     src = ROOT/'analysis/src'
     yield from (ROOT/'analysis/package.json', ROOT/'analysis/package-lock.json')
-    yield from (p for p in src.rglob('*') if p.relative_to(src).as_posix() not in GATEWAY_SRC_IGNORE)
+    yield from src.rglob('*')
     yield from (ROOT/'analysis/frame_reader.py', ROOT/'analysis/minicpm_client.py')
-    yield from (ROOT/'worker/src').rglob('*')
-    yield ROOT/'edge/image_quality.py'
+    yield from (ROOT/'analysis/shared/investigation.js', ROOT/'analysis/shared/image_quality.py')
 
 def gateway_build_id():
     """Short deterministic fingerprint of the files shipped in the gateway image, reported by /health as build_id.
@@ -161,11 +156,11 @@ image = (
     .run_commands('cd /app/analysis && npm ci --omit=dev')
     .env({'FIREGUARD_DATA_DIR':'/tmp/fireguard', 'PYTHONUNBUFFERED':'1', 'OMP_NUM_THREADS':'2',
           'FIREGUARD_BUILD_ID':gateway_build_id()})
-    .add_local_dir(ROOT/'analysis/src', '/app/analysis/src', ignore=GATEWAY_SRC_IGNORE)
+    .add_local_dir(ROOT/'analysis/src', '/app/analysis/src')
     .add_local_file(ROOT/'analysis/frame_reader.py', '/app/analysis/frame_reader.py')
     .add_local_file(ROOT/'analysis/minicpm_client.py', '/app/analysis/minicpm_client.py')
-    .add_local_dir(ROOT/'worker/src', '/app/worker/src')
-    .add_local_file(ROOT/'edge/image_quality.py', '/app/edge/image_quality.py')
+    .add_local_file(ROOT/'analysis/shared/investigation.js', '/app/analysis/shared/investigation.js')
+    .add_local_file(ROOT/'analysis/shared/image_quality.py', '/app/analysis/shared/image_quality.py')
 )
 
 # The gateway needs the native bearer too, to connect to NativeLive.

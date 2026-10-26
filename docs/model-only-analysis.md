@@ -1,6 +1,6 @@
 # MiniCPM-only product path
 
-The user authorized removing YOLO after its repeated false smoke proposals blocked the model's lighter classification. The production server now imports `VlmCoordinator` and `FrameReader`; it does not import the historical detector coordinator. The Modal CPU image omits YOLO weights, Ultralytics, CPU PyTorch, the old coordinator/priority/Scout files and the edge detector implementation. Historical experiments and the user's original training checkpoint are retained outside the deployed product.
+The user authorized removing YOLO after its repeated false smoke proposals blocked the model's lighter classification. The production server now imports `VlmCoordinator` and `FrameReader`; it does not import the historical detector coordinator. The Modal CPU image omits YOLO weights, Ultralytics, CPU PyTorch, the old coordinator/priority/Scout files and the edge detector implementation. Historical experiments and the user's original training checkpoint are archived under `legacy/` (for example `legacy/detector/fire_seg.pt`), outside the deployed product.
 
 The private frame reader validates JPEG/video bounds and measures existing pixel-quality statistics. It emits no detections. The exact usable quality-checked images are forwarded over the persistent native GPU WebSocket. Malformed native reports invalidate monitoring support, including its temporal interval. Reports from before a gap or invalid-response barrier cannot qualify a subsequent scene. A quiet/listening transport state cannot supply a negative observation.
 

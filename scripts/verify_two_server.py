@@ -1,4 +1,4 @@
-"""Real HTTP/WS integration run. Fresh Scout calls; no cached provider outputs."""
+"""Real HTTP/WS integration run (local gateway or --base-url deployment). Fresh MiniCPM calls; no cached provider outputs."""
 import argparse
 import asyncio
 import json
@@ -7,21 +7,12 @@ import secrets
 import subprocess
 import sys
 import time
-import tomllib
 import uuid
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from camera.server import frame_packet
-
-def credentials(env,reuse_login):
-    if env.get('CLOUDFLARE_API_TOKEN') and env.get('CLOUDFLARE_ACCOUNT_ID'):return
-    if not reuse_login:raise RuntimeError('Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID')
-    config=Path(os.environ['APPDATA'])/'xdg.config/.wrangler/config/default.toml'
-    saved=tomllib.loads(config.read_text(encoding='utf-8'))
-    env['CLOUDFLARE_API_TOKEN']=saved['oauth_token']
-    env['CLOUDFLARE_ACCOUNT_ID']=json.loads((ROOT/'.wrangler/cache/wrangler-account.json').read_text())['account']['id']
 
 async def ws_replay(path,url,token):
     from websockets.asyncio.client import connect
@@ -57,7 +48,6 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--video-dir',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
-    parser.add_argument('--reuse-cloudflare-login',action='store_true')
     parser.add_argument('--websocket-video',type=Path)
     parser.add_argument('--only',help='Optional one filename to upload')
     parser.add_argument('--port',type=int,default=8002,help='Analysis port for this isolated verification run')
@@ -70,7 +60,7 @@ def main():
         token=saved['token'];base=args.base_url.rstrip('/')
         remote_config(base,token) # Reject plaintext remote URLs and credential-bearing URLs.
     else:
-        env=os.environ.copy();credentials(env,args.reuse_cloudflare_login)
+        env=os.environ.copy()
         token=secrets.token_urlsafe(32)
         env.update(FIREGUARD_TOKEN=token,FIREGUARD_DATA_DIR=str(args.output/'data'),EXPECTED_LIGHTER_CAMERAS='test-camera',
                    FIREGUARD_PYTHON=sys.executable,ANALYSIS_PORT=str(args.port))

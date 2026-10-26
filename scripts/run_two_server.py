@@ -24,11 +24,7 @@ def load_environment():
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--allow-expected-lighter',action='store_true')
-    parser.add_argument('--reuse-cloudflare-login',action='store_true',help='Use an existing valid local OAuth login for development only')
     args=parser.parse_args();env=load_environment()
-    if args.reuse_cloudflare_login:
-        from verify_two_server import credentials
-        credentials(env,True)
     env.setdefault('FIREGUARD_TOKEN',secrets.token_urlsafe(32));env.setdefault('FIREGUARD_PYTHON',sys.executable)
     if args.allow_expected_lighter:env['EXPECTED_LIGHTER_CAMERAS']=env.get('CAMERA_ID','test-camera')
     children=[];logs=[];stopping=False

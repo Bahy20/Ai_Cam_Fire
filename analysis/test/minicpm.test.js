@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MiniCPM,toInvestigation,MINICPM_MODEL,minicpmEnv } from '../src/minicpm.js';
-import {qualifyModelInvestigation} from '../../worker/src/investigation.js';
-import {lighterSupported} from '../src/priority.js';
+import {qualifyModelInvestigation} from '../shared/investigation.js';
+import {lighterSupported} from '../src/vlm-coordinator.js';
 import {buildServer} from '../src/server.js';
 import {Store} from '../src/store.js';
 

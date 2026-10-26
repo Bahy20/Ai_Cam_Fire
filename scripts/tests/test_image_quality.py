@@ -8,7 +8,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-from edge.image_quality import assess_frame_quality
+from analysis.shared.image_quality import assess_frame_quality
 
 
 class ImageQualityTests(unittest.TestCase):

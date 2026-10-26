@@ -22,9 +22,7 @@ class ModalConfigTests(unittest.TestCase):
 
     def test_minicpm_requires_no_cloudflare_credentials(self):
         values=secret_values({},'service')
-        self.assertEqual(values['CLOUDFLARE_API_TOKEN'],'')
-        values=secret_values({},'service',infrastructure_only=True)
-        self.assertEqual(values['CLOUDFLARE_API_TOKEN'],'')
+        self.assertEqual((values['CLOUDFLARE_ACCOUNT_ID'],values['CLOUDFLARE_API_TOKEN']),('',''))
 
     def test_gateway_secret_carries_the_cookie_secret_and_not_the_native_token(self):
         values=secret_values({'FIREGUARD_NATIVE_TOKEN':'gpu'},'service',cookie_secret='jar')

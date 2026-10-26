@@ -17,8 +17,8 @@ def native_secret_values(native_token):
     # The only key the native GPU service receives.
     return {'FIREGUARD_NATIVE_TOKEN':native_token}
 
-def secret_values(env,token,infrastructure_only=False,cookie_secret=''):
-    # update() merges keys: explicit empty values revoke old credentials/policy.
+def secret_values(env,token,cookie_secret=''):
+    # update() merges keys: explicit empty values revoke old credentials/policy (the retired Cloudflare keys included).
     return {'FIREGUARD_TOKEN':token,'FIREGUARD_COOKIE_SECRET':cookie_secret,'CLOUDFLARE_ACCOUNT_ID':'','CLOUDFLARE_API_TOKEN':'',
             'EXPECTED_LIGHTER_CAMERAS':env.get('EXPECTED_LIGHTER_CAMERAS',''),
             'TESTER_ACCESS_CODE':env.get('TESTER_ACCESS_CODE',''),
@@ -28,12 +28,11 @@ def secret_values(env,token,infrastructure_only=False,cookie_secret=''):
 def main():
     import modal
     parser=argparse.ArgumentParser()
-    parser.add_argument('--infrastructure-only',action='store_true',help='Deprecated compatibility option; MiniCPM needs no Cloudflare credentials')
-    args=parser.parse_args()
+    parser.parse_args()
     env=load_environment()
     saved=json.loads(CLIENT.read_text()) if CLIENT.exists() else {}
     creds=credentials(saved,env)
-    values=secret_values(env,creds['token'],args.infrastructure_only,cookie_secret=creds['cookie_secret'])
+    values=secret_values(env,creds['token'],cookie_secret=creds['cookie_secret'])
     # Save first so a network error cannot orphan randomly generated credentials.
     CLIENT.write_text(json.dumps({**saved,**creds},indent=2),encoding='utf-8')
     for name,named in (('fireguard-analysis-config',values),('fireguard-native-config',native_secret_values(creds['native_token']))):
