@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Store } from './store.js';
-import { VlmCoordinator } from './vlm-coordinator.js';
+import { VlmCoordinator,POLICY_VERSION } from './vlm-coordinator.js';
 import { FrameReader } from './frame-reader.js';
 import { MiniCPM } from './minicpm.js';
 import {NativeStream} from './native-stream.js';
@@ -18,6 +18,9 @@ import {testerAccess} from './tester-access.js';
 
 const root=fileURLToPath(new URL('../../',import.meta.url));
 const cameraPattern=/^[A-Za-z0-9_-]{1,80}$/;
+// Alert state worth an immediate snapshot: the hazard latch, the incident, and the latest operator review.
+const criticalSignature=r=>JSON.stringify([Boolean(r.incident_history?.model_hazard),r.incident_id??null,
+  r.incident_history?.last_review?.incident_id??null,r.incident_history?.last_review?.reviewed_at_ms??null]);
 function authorized(request,token) {
   const actual=Buffer.from(request.headers.authorization??'');const expected=Buffer.from(`Bearer ${token}`);
   return actual.length===expected.length && timingSafeEqual(actual,expected);
@@ -46,12 +49,20 @@ export async function buildServer(options={}) {
   const restartNative=new WeakMap();
   const coordinators=new Set();
   const makeCoordinator=(cameraId,sessionId,mode,onResult,policyCameraId=cameraId)=>{
-    const c=new VlmCoordinator({cameraId,sessionId,mode,onResult,
+    // The hook runs on a later microtask, so neither a throw nor a rejection can reach the coordinator or socket.
+    let signature=null;const watched=mode==='live'&&options.onCriticalChange?body=>{
+      const next=criticalSignature(body);
+      if(next!==signature){signature=next;void Promise.resolve(body).then(options.onCriticalChange).catch(error=>console.error('Critical change hook failed:',error?.message??error));}
+      onResult(body);
+    }:onResult;
+    const c=new VlmCoordinator({cameraId,sessionId,mode,onResult:watched,
       store,scout,now,expectedLighterUse:expected.has(policyCameraId),siteHazard:hazards.has(policyCameraId),streaming:mode==='live'&&Boolean(nativeStreamFactory)});
-    coordinators.add(c);return c;
+    signature=criticalSignature(c.result());coordinators.add(c);return c;
   };
   const retire=async c=>{await c.drain();coordinators.delete(c);};
   const tick=setInterval(()=>{if(live)live.tick();},1000);tick.unref();
+  // Store.prune() bounds retained history; optional chaining keeps older stores working.
+  const pruner=setInterval(()=>{try{store.prune?.();}catch(error){console.error('Store prune failed:',error.message);}},3600000);pruner.unref();
   app.addHook('onRequest',async(request,reply)=>{
     if(request.url==='/health'||testers?.isPublic(request))return;
     if(authorized(request,token))return;
@@ -61,7 +72,7 @@ export async function buildServer(options={}) {
     if((request.method!=='GET'||path==='/v1/live')&&!testers.sameOrigin(request))return reply.code(403).send({error:'same_origin_required'});
     request.testerSession=session;
   });
-  app.get('/health',async()=>({ok:true,service:'fireguard-analysis',scout_configured:false,
+  app.get('/health',async()=>({ok:true,service:'fireguard-analysis',policy_version:POLICY_VERSION,build_id:process.env.FIREGUARD_BUILD_ID??null,scout_configured:false,
     vlm_configured:Boolean(scout.configured),vlm_provider:scout.source??'injected',vlm_model:scout.model??null,
     live_vlm_mode:nativeStreamFactory?'native_visual_stream':'image_batches',
     live_active:Boolean(live),video_job_active:Boolean(activeJob),frame_reader_available:!frameReader.closed,
@@ -201,7 +212,7 @@ export async function buildServer(options={}) {
   });
   app.decorate('fireguard',{store,frameReader,scout,analyzer:scout,waitForJobs:async()=>{if(activeJob)await activeJob;}});
   app.addHook('onClose',async()=>{
-    closing=true;clearInterval(tick);for(const socket of sockets)socket.terminate();
+    closing=true;clearInterval(tick);clearInterval(pruner);for(const socket of sockets)socket.terminate();
     for(const stream of nativeStreams)stream.close();nativeStreams.clear();
     for(const c of coordinators)c.disconnect();scout.close?.();
     if(activeJob)await activeJob;

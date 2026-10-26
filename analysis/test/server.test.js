@@ -134,3 +134,85 @@ test('health shows a crash-looping frame reader through restarts and the last fa
   }finally{await app.close();await stub.close();store.close();await rm(dir,{recursive:true,force:true});}
   assert.equal(frameReader.closed,true);
 });
+test('health reports the deployed policy version and build id',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-build-')),store=new Store(':memory:'),previous=process.env.FIREGUARD_BUILD_ID;
+  delete process.env.FIREGUARD_BUILD_ID;
+  const app=await buildServer({token:'test',dataDir:dir,store,frameReader:{close(){}},scout:{configured:false}});
+  try{
+    let h=(await app.inject({url:'/health'})).json();assert.equal(h.policy_version,'minicpm-only-v3');assert.equal(h.build_id,null);
+    process.env.FIREGUARD_BUILD_ID='3f9c2a71be04';h=(await app.inject({url:'/health'})).json();
+    assert.equal(h.build_id,'3f9c2a71be04');assert.equal(h.policy_version,'minicpm-only-v3');
+  }finally{
+    if(previous===undefined)delete process.env.FIREGUARD_BUILD_ID;else process.env.FIREGUARD_BUILD_ID=previous;
+    await app.close();store.close();await rm(dir,{recursive:true,force:true});
+  }
+});
+
+// Live session whose native stream reports `state.smoke` for every forwarded frame.
+async function criticalHarness(onCriticalChange) {
+  const dir=await mkdtemp(join(tmpdir(),'fire-critical-')),store=new Store(':memory:'),state={clock:100000,smoke:'present',sequence:0};
+  const report=(session_id,f)=>({session_id,engine:'minicpm-native-visual',native_chunks:1,source_ts_ms:f.ts_ms,assessment_source_ts_ms:f.ts_ms,text:state.smoke,
+    assessment:{frame_id:`frame-${f.ts_ms}`,flame:'not_observed',smoke:state.smoke,burning_material:'not_observed',lighter:'not_observed',
+      flame_relation:'not_observed',occlusion:'not_observed',description:state.smoke==='present'?'smoke':'clear'}});
+  const app=await buildServer({token:'test',dataDir:dir,store,now:()=>state.clock,onCriticalChange,
+    frameReader:{infer:async()=>({frame_wh:[640,480],visibility:'unknown'}),close(){}},scout:{configured:false},
+    nativeStreamFactory:({sessionId,onState,onResult})=>({open:async()=>onState('listening'),close(){},push:f=>onResult(report(sessionId,f),f)})});
+  await app.listen({host:'127.0.0.1',port:0});
+  const ws=new WebSocket(`ws://127.0.0.1:${app.server.address().port}/v1/live`,{headers:{authorization:'Bearer test'}});await once(ws,'open');
+  const messages=[];ws.on('message',raw=>messages.push(JSON.parse(raw)));
+  const until=async(check,label)=>{for(let i=0;i<400&&!messages.some(check);i++)await new Promise(r=>setTimeout(r,5));assert.ok(messages.some(check),label);};
+  ws.send(JSON.stringify({type:'start',camera_id:'cam',session_id:'source'}));await until(x=>x.type==='ready','ready');
+  const sid=messages.find(x=>x.type==='ready').assessment_session_id;
+  const frame=async()=>{
+    state.clock+=500;const ts=state.clock;
+    ws.send(encodeFrame({session_id:'source',sequence:++state.sequence,ts_ms:ts},Buffer.from([255,216,255,217])));
+    await until(x=>x.trigger==='native_result'&&x.native_stream?.assessment_ts_ms===ts,`native result for ${ts}`);return messages.at(-1);
+  };
+  const review=last=>app.inject({method:'POST',url:`/v1/live/${sid}/review`,headers:{authorization:'Bearer test'},
+    payload:{incident_id:last.incident_id,last_hazard_ts_ms:last.incident_history.latest_hazard.ts_ms,action:'false_alarm'}});
+  const close=async()=>{if(ws.readyState===WebSocket.OPEN){ws.close();await once(ws,'close');}await app.close();store.close();await rm(dir,{recursive:true,force:true});};
+  return {state,ws,messages,frame,review,close};
+}
+test('alert-state changes reach onCriticalChange once each, not on every frame',async()=>{
+  const calls=[],h=await criticalHarness(result=>{calls.push(result);});
+  try{
+    await h.frame();
+    assert.equal(calls.length,1,'a first smoke report opens an (unconfirmed) incident');
+    assert.equal(calls[0].incident_history.model_hazard,false);assert.equal(typeof calls[0].incident_id,'string');
+    await h.frame();
+    assert.equal(calls.length,2,'the latch is reported exactly once');
+    assert.equal(calls[1].incident_history.model_hazard,true);assert.equal(calls[1].incident_id,calls[0].incident_id);
+    let last;for(let i=0;i<3;i++)last=await h.frame();
+    assert.equal(last.incident_history.model_hazard,true);assert.equal(calls.length,2,'latched hazard refreshes are not critical changes');
+    const reviewed=await h.review(last);assert.equal(reviewed.statusCode,200,reviewed.body);
+    assert.equal(calls.length,3,'an operator review is reported exactly once');
+    assert.equal(calls[2].incident_history.model_hazard,false);assert.equal(calls[2].incident_id,null);
+    assert.equal(calls[2].incident_history.last_review.action,'false_alarm');
+    h.state.smoke='not_observed';for(let i=0;i<3;i++)await h.frame();
+    assert.equal(calls.length,3,'clear frames after the review are not critical changes');
+  }finally{await h.close();}
+});
+test('a throwing or rejecting onCriticalChange hook cannot break the live socket',async()=>{
+  let calls=0;const logged=[],error=console.error;console.error=(...args)=>{logged.push(args.join(' '));};
+  const h=await criticalHarness(()=>{if(++calls===1)throw new Error('hook_threw');return Promise.reject(new Error('hook_rejected'));});
+  try{
+    await h.frame();await h.frame();const last=await h.frame();
+    assert.equal(calls,2);assert.equal(h.ws.readyState,WebSocket.OPEN);assert.equal(last.incident_history.model_hazard,true);
+    assert.ok(!h.messages.some(x=>x.type==='error'),'hook failures must not surface as frame failures');
+    await new Promise(r=>setImmediate(r));
+    assert.deepEqual(logged.map(line=>line.match(/hook_(threw|rejected)/)?.[0]),['hook_threw','hook_rejected']);
+  }finally{console.error=error;await h.close();}
+});
+test('the store is pruned hourly when it supports pruning, harmlessly otherwise',async t=>{
+  t.mock.timers.enable({apis:['setInterval']});
+  const dir=await mkdtemp(join(tmpdir(),'fire-prune-'));let pruned=0;const logged=[],error=console.error;
+  const app=await buildServer({token:'test',dataDir:dir,store:{prune:()=>{if(++pruned===2)throw new Error('prune_failed');}},frameReader:{close(){}},scout:{configured:false}});
+  const plain=await buildServer({token:'test',dataDir:dir,store:{},frameReader:{close(){}},scout:{configured:false}});
+  try{
+    await app.ready();await plain.ready();console.error=(...args)=>{logged.push(args.join(' '));};
+    t.mock.timers.tick(3600000-1);assert.equal(pruned,0);
+    t.mock.timers.tick(1);assert.equal(pruned,1);
+    t.mock.timers.tick(3600000);assert.equal(pruned,2);assert.equal(logged.length,1);assert.match(logged[0],/prune_failed/);
+  }finally{console.error=error;await app.close();await plain.close();t.mock.timers.tick(3600000);assert.equal(pruned,2,'closing stops pruning');
+    t.mock.timers.reset();await rm(dir,{recursive:true,force:true});}
+});

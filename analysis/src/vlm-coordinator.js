@@ -137,7 +137,7 @@ export class VlmCoordinator {
           this.native.assessment=report.assessment;this.native.assessment_ts_ms=ts;
           this.inference={mode:'fresh',source:'modal',model:MINICPM_MODEL,revision:MINICPM_REVISION,engine:report.engine,
             elapsed_ms:report.elapsed_ms,completed_at_ms:this.now(),purpose:'native_scene',validation_errors:[],frame_ids:[frame.frame_id],native_chunks:report.native_chunks};
-          this.store.inference(this.sessionId,{...this.inference,raw:JSON.stringify(report.assessment),archive:this.store.archive(this.sessionId,[frame])});
+          this.store.inference(this.sessionId,{...this.inference,raw:JSON.stringify(report.assessment),archive:this.store.archive(this.sessionId,[frame],{protect:this.hazardLatch})});
         }catch{this.native.validation_error='native_invalid_report';this.scene=null;this.lastRow=null;this.rows=[];this.clearRows=[];
           this.barrier=Math.max(this.barrier,this.sourceNow());}
       }
@@ -153,7 +153,7 @@ export class VlmCoordinator {
     if(!pool.length||!final&&(pool.length<3||pool.at(-1).ts_ms-pool[0].ts_ms<2000))return;
     const frames=pool.length<3?pool:[pool[0],pool[Math.floor((pool.length-1)/2)],pool.at(-1)],generation=this.generation;
     this.lastDispatch=this.sourceNow();this.lastAnalyzedTs=frames.at(-1).ts_ms;
-    const started=this.now(),archive=this.store.archive(this.sessionId,frames);
+    const started=this.now(),archive=this.store.archive(this.sessionId,frames,{protect:this.hazardLatch});
     this.running=Promise.resolve().then(()=>this.scout.analyze(frames,{timeout:this.mode==='recorded'?60000:30000,
       shouldRun:()=>this.connected&&generation===this.generation&&this.usable()&&this.sourceNow()-frames[0].ts_ms<=AGE})).then(response=>{
       const metadata={mode:response.mode??'fresh',source:'modal',model:MINICPM_MODEL,revision:MINICPM_REVISION,
@@ -233,7 +233,7 @@ export class VlmCoordinator {
       evidence:{frame_ids:sceneCurrent?this.scene.frame_ids:[],scene_end_ts_ms:this.scene?.endTs??null},
       limitations:['operator_priority_is_not_physical_risk','cause_is_unverified','model_only_visual_assessment']};
   }
-  publish(trigger,status='active'){const result=this.result();this.store.save(this.sessionId,result,status);this.onResult({...result,trigger});}
+  publish(trigger,status='active'){const result=this.result();this.store.save(this.sessionId,result,status,trigger);this.onResult({...result,trigger});}
   reviewAlert({incident_id,last_hazard_ts_ms,action,actor}){
     if(!['false_alarm','incident_resolved'].includes(action))throw new Error('invalid_review_action');
     if(!this.connected||this.mode!=='live'||!this.hazardLatch||incident_id!==this.incidentId||last_hazard_ts_ms!==(this.latestHazard?.ts_ms??null))throw new Error('alert_updated_review_again');

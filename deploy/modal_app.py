@@ -3,6 +3,33 @@ from pathlib import Path
 import modal
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# analysis/src files the gateway image leaves out (legacy coordinator). Root-relative names, as add_local_dir's
+# dockerignore-style matcher reads them; shared with gateway_files() so the build id hashes what ships.
+GATEWAY_SRC_IGNORE = ['coordinator.js', 'priority.js', 'scout.js']
+
+def gateway_files():
+    """Every local file the gateway `image` below uploads; keep in step with its add_local_* calls."""
+    src = ROOT/'analysis/src'
+    yield from (ROOT/'analysis/package.json', ROOT/'analysis/package-lock.json')
+    yield from (p for p in src.rglob('*') if p.relative_to(src).as_posix() not in GATEWAY_SRC_IGNORE)
+    yield from (ROOT/'analysis/frame_reader.py', ROOT/'analysis/minicpm_client.py')
+    yield from (ROOT/'worker/src').rglob('*')
+    yield ROOT/'edge/image_quality.py'
+
+def gateway_build_id():
+    """Short deterministic fingerprint of the files shipped in the gateway image, reported by /health as build_id.
+    CRLF is hashed as LF, so Windows and Linux checkouts of the same commit get the same id. In a container
+    (modal.is_local() is False) Modal re-imports this module without the sources, and the built image already
+    carries FIREGUARD_BUILD_ID, so it returns a placeholder there instead of hashing (or raising)."""
+    import hashlib
+    if not modal.is_local():
+        return 'container'
+    digest = hashlib.sha256()
+    for path in sorted((p for p in gateway_files() if p.is_file()), key=lambda p: p.relative_to(ROOT).as_posix()):
+        digest.update(path.relative_to(ROOT).as_posix().encode() + b'\0' + path.read_bytes().replace(b'\r\n', b'\n') + b'\0')
+    return digest.hexdigest()[:12]
+
 app = modal.App('fireguard-analysis')
 volume = modal.Volume.from_name('fireguard-analysis-data', create_if_missing=True)
 secret = modal.Secret.from_name('fireguard-analysis-config', required_keys=['FIREGUARD_TOKEN'])
@@ -129,8 +156,9 @@ image = (
     .add_local_file(ROOT/'analysis/package.json', '/app/analysis/package.json', copy=True)
     .add_local_file(ROOT/'analysis/package-lock.json', '/app/analysis/package-lock.json', copy=True)
     .run_commands('cd /app/analysis && npm ci --omit=dev')
-    .env({'FIREGUARD_DATA_DIR':'/tmp/fireguard', 'PYTHONUNBUFFERED':'1', 'OMP_NUM_THREADS':'2'})
-    .add_local_dir(ROOT/'analysis/src', '/app/analysis/src', ignore=['coordinator.js','priority.js','scout.js'])
+    .env({'FIREGUARD_DATA_DIR':'/tmp/fireguard', 'PYTHONUNBUFFERED':'1', 'OMP_NUM_THREADS':'2',
+          'FIREGUARD_BUILD_ID':gateway_build_id()})
+    .add_local_dir(ROOT/'analysis/src', '/app/analysis/src', ignore=GATEWAY_SRC_IGNORE)
     .add_local_file(ROOT/'analysis/frame_reader.py', '/app/analysis/frame_reader.py')
     .add_local_file(ROOT/'analysis/minicpm_client.py', '/app/analysis/minicpm_client.py')
     .add_local_dir(ROOT/'worker/src', '/app/worker/src')
@@ -148,14 +176,32 @@ class Analysis:
         import subprocess
         import sys
         import threading
+        import time
         self.stop_event = threading.Event()
         env = {**os.environ, 'FIREGUARD_PYTHON':sys.executable,
                'MINICPM_NATIVE_URL':NativeLive().web.get_web_url()}
         self.process = subprocess.Popen(['node','analysis/src/modal-entry.js'], cwd='/app', env=env)
+        # Node writes this marker after an alert-state snapshot so it reaches the volume without the periodic wait.
+        marker = os.path.join(os.environ.get('FIREGUARD_DATA_DIR', '/tmp/fireguard'), 'commit-requested')
         def persist():
-            while not self.stop_event.wait(10):
+            last = time.monotonic()
+            while not self.stop_event.wait(1):
                 if self.process.poll() is not None:
+                    if self.stop_event.is_set():
+                        break  # Shutting down: stop() commits once the process has exited.
+                    try:
+                        volume.commit()  # Keep the snapshots Node wrote before it died.
+                    except Exception:
+                        print('FireGuard volume commit failed', flush=True)
                     os._exit(1)  # Fail the container so Modal can replace a dead backend.
+                try:
+                    os.remove(marker)  # Remove first: a request made during the commit triggers the next one.
+                    requested = True
+                except OSError:
+                    requested = False
+                if not requested and time.monotonic() - last < 10:
+                    continue
+                last = time.monotonic()
                 try:
                     volume.commit()
                 except Exception:

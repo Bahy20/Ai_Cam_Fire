@@ -11,6 +11,7 @@ from camera.server import frame_packet
 
 OUT=ROOT/'.hermes/minicpm-replacement'
 MODEL='openbmb/MiniCPM-o-4_5'
+POLICY='minicpm-only-v3'
 
 async def live(config,cookie,fixture=None,label='lighter',require_fresh=True):
     fixture=fixture or ROOT/'.hermes/minicpm-recording-20261023/camera-66s.jpg'
@@ -56,6 +57,8 @@ def main():
     health=s.get(base+'/health',timeout=180);health.raise_for_status();health=health.json()
     (OUT/'health.json').write_text(json.dumps(health,indent=2))
     assert health['vlm_model']==MODEL and health['vlm_provider']=='modal' and not health['scout_configured'],health
+    assert health['policy_version']==POLICY and isinstance(health['build_id'],str) and health['build_id'],health
+    print(json.dumps({'policy_version':health['policy_version'],'build_id':health['build_id']}),flush=True)
     if health['video_job_active'] or health['live_active']:raise RuntimeError('deployed_service_busy')
     page=s.get(base+'/testing',timeout=30);page.raise_for_status();assert 'MiniCPM-o 4.5' in page.text
     r=s.post(base+'/testing/login',headers={'Origin':base},json={'code':config['tester_code']},timeout=30);r.raise_for_status()
