@@ -64,7 +64,8 @@ export async function buildServer(options={}) {
   app.get('/health',async()=>({ok:true,service:'fireguard-analysis',scout_configured:false,
     vlm_configured:Boolean(scout.configured),vlm_provider:scout.source??'injected',vlm_model:scout.model??null,
     live_vlm_mode:nativeStreamFactory?'native_visual_stream':'image_batches',
-    live_active:Boolean(live),video_job_active:Boolean(activeJob),frame_reader_available:!frameReader.closed,detection_source:'minicpm',yolo_enabled:false}));
+    live_active:Boolean(live),video_job_active:Boolean(activeJob),frame_reader_available:!frameReader.closed,
+    frame_reader_restarts:frameReader.restarts??0,frame_reader_last_failure:frameReader.lastFailure??null,detection_source:'minicpm',yolo_enabled:false}));
   app.get('/v1/live',{websocket:true},(socket,request)=>{
     const expiry=request.testerSession?setTimeout(()=>socket.close(1000,'Ten-minute test session ended'),Math.min(600000,request.testerSession.expires-now())):null;
     if(expiry)socket.once('close',()=>clearTimeout(expiry));

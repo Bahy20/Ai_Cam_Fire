@@ -5,6 +5,9 @@ from analysis.minicpm_contract import single_image_prompt,parse_batch
 ENGINE='minicpm-native-visual'
 MODE='native_visual_stream'
 
+def hazard_row(a):
+    return a['smoke']=='present' or a['burning_material']=='present' or (a['flame']=='present' and a['flame_relation']=='separate')
+
 class VisualSession:
     def __init__(self,model,session_id):
         self.model=model;self.session_id=session_id;self.chunks=0;self.epoch=0;self.last_ts=-1;self.last_sequence=0
@@ -45,6 +48,10 @@ class VisualSession:
         context=self.model._get_kv_cache_length()
         if context>4096:
             assessment=None;error='native_context_limit';self.reset();context=0
+        elif assessment and hazard_row(assessment):
+            # A hazard answer conditions later answers on itself. The gateway
+            # needs independent confirming rows, so judge the next image fresh.
+            self.reset();context=0
         self.chunks+=1
         return {'type':'native_result','engine':ENGINE,'mode':MODE,'session_id':self.session_id,
             'sequence':sequence,'source_ts_ms':ts,'native_chunks':self.chunks,'context_tokens':context,'context_epoch':self.epoch,

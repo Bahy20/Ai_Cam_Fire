@@ -16,12 +16,18 @@ const row=(ts,kind='negative')=>({frame_id:`frame-${ts}`,flame:kind==='lighter'|
   smoke:kind==='smoke'?'present':'not_observed',burning_material:kind==='material'?'present':'not_observed',
   lighter:kind==='lighter'?'present':'not_observed',flame_relation:kind==='lighter'?'at_tool_tip':kind==='separate'?'separate':'not_observed',
   occlusion:kind==='uncertain'?'uncertain':'not_observed',description:kind});
-function native(s,ts,kind='negative',extra={}){
-  s.at(ts);s.c.accept(frame(ts,extra));
-  s.c.acceptNative({session_id:s.c.sessionId,engine:'minicpm-native-duplex',native_chunks:1,
-    source_ts_ms:ts,assessment_source_ts_ms:ts,assessment:row(ts,kind),text:'report',context_tokens:500,elapsed_ms:100},
-    {ts_ms:ts,jpeg:Buffer.from('AQI=','base64')});
-}
+const report=(s,ts,kind='negative')=>s.c.acceptNative({session_id:s.c.sessionId,engine:'minicpm-native-duplex',native_chunks:1,
+  source_ts_ms:ts,assessment_source_ts_ms:ts,assessment:row(ts,kind),text:'report',context_tokens:500,elapsed_ms:100},
+  {ts_ms:ts,jpeg:Buffer.from('AQI=','base64')});
+function native(s,ts,kind='negative',extra={}){s.at(ts);s.c.accept(frame(ts,extra));report(s,ts,kind);}
+// Slow model cadence: camera frames every second keep the receipt fresh (no observation gap) between clear reports.
+const slowClear=(s,from,step,each=()=>{})=>{for(let i=1;i<=8;i++){const ts=from+i*step;
+  for(let t=ts-step+1000;t<ts;t+=1000){s.at(t);s.c.accept(frame(t));}native(s,ts);each(i);}};
+// One model report cannot latch a hazard; two corroborating reports ending at ts can.
+const confirmed=(s,kind='smoke',ts=100000)=>{native(s,ts-1000,kind);native(s,ts,kind);};
+const fill=(s,from,to)=>{for(let t=from;t<to;t+=1000){s.at(t);s.c.accept(frame(t));}};
+const invalid=(s,ts)=>{s.at(ts);s.c.accept(frame(ts));s.c.acceptNative({session_id:s.c.sessionId,engine:'minicpm-native-visual',native_chunks:1,
+  source_ts_ms:ts,assessment:null,validation_error:'native_unstructured_output'},{jpeg:Buffer.from('AQI=','base64')});};
 
 test('no VLM report cannot become a negative or a monitoring result',()=>{
   const s=setup();try{s.c.accept(frame(100000));const r=s.c.result();
@@ -41,26 +47,27 @@ test('live startup and unusable camera frames explain why assessment is unavaila
 });
 test('reviewed false alert is audited, rejects old evidence and rearms for fresh hazards',()=>{
   const s=setup();try{
-    native(s,100000,'smoke');const alert=s.c.result();native(s,101000,'negative');
+    confirmed(s);const alert=s.c.result();native(s,101000,'negative');
     assert.match(s.c.result().priority.label,/earlier|previous/i);
     s.at(102000);s.c.reviewAlert({incident_id:alert.incident_id,last_hazard_ts_ms:100000,action:'false_alarm',actor:'tester'});
     assert.equal(s.c.result().incident_history.model_hazard,false);assert.equal(s.c.result().priority.level,'unknown');
     assert.equal(s.store.reviews(s.c.sessionId)[0].action,'false_alarm');
-    native(s,101500,'smoke');assert.equal(s.c.result().incident_history.model_hazard,false,'pre-review findings cannot relatch');
-    native(s,103000,'smoke');assert.equal(s.c.result().priority.level,'inspect_urgently');
+    native(s,101200,'smoke');native(s,101500,'smoke');assert.equal(s.c.result().incident_history.model_hazard,false,'pre-review findings cannot relatch');
+    native(s,103000,'smoke');assert.equal(s.c.result().incident_history.model_hazard,false,'pre-review findings cannot corroborate');
+    native(s,104000,'smoke');assert.equal(s.c.result().priority.level,'inspect_urgently');
     assert.notEqual(s.c.result().incident_id,alert.incident_id);
   }finally{s.store.close();}
 });
 test('an outdated operator review cannot dismiss a newer hazard',()=>{
   const s=setup();try{
-    native(s,100000,'smoke');const incident=s.c.result().incident_id;native(s,101000,'material');
+    confirmed(s);const incident=s.c.result().incident_id;native(s,101000,'material');
     assert.throws(()=>s.c.reviewAlert({incident_id:incident,last_hazard_ts_ms:100000,action:'false_alarm',actor:'tester'}),/alert_updated/);
     assert.equal(s.c.result().incident_history.model_hazard,true);assert.equal(s.store.reviews(s.c.sessionId).length,0);
   }finally{s.store.close();}
 });
 test('eight consecutive fresh clear observations recover current priority without deleting the incident',()=>{
   const s=setup();try{
-    native(s,100000,'smoke');const incident=s.c.result().incident_id;
+    confirmed(s);const incident=s.c.result().incident_id;
     for(let i=1;i<=7;i++)native(s,100000+i*1000);
     assert.equal(s.c.result().priority.level,'inspect_urgently');
     native(s,108000);const clear=s.c.result();
@@ -72,7 +79,7 @@ test('eight consecutive fresh clear observations recover current priority withou
 });
 test('gaps, darkness, uncertainty and invalid reports cannot complete automatic recovery',()=>{
   for(const interruption of ['gap','dark','uncertain','invalid']){const s=setup();try{
-    native(s,100000,'smoke');for(let i=1;i<=7;i++)native(s,100000+i*1000);
+    confirmed(s);for(let i=1;i<=7;i++)native(s,100000+i*1000);
     if(interruption==='gap'){s.at(108000);s.c.gap('capture_gap');}
     if(interruption==='dark')native(s,108000,'negative',{visibility:'degraded'});
     if(interruption==='uncertain')native(s,108000,'uncertain');
@@ -83,7 +90,7 @@ test('gaps, darkness, uncertainty and invalid reports cannot complete automatic 
 });
 test('malformed assessment cannot replay old clear evidence after interruption',()=>{
   const s=setup();try{
-    native(s,100000,'smoke');for(let i=1;i<=7;i++)native(s,100000+i*1000);
+    confirmed(s);for(let i=1;i<=7;i++)native(s,100000+i*1000);
     s.at(108000);s.c.accept(frame(108000));
     const report=ts=>({session_id:s.c.sessionId,engine:'minicpm-native-visual',source_ts_ms:108000,
       assessment_source_ts_ms:ts,assessment:row(ts)});
@@ -97,13 +104,103 @@ test('malformed assessment cannot replay old clear evidence after interruption',
 
 test('missing model observations and stale receipt reset recovery evidence',()=>{
   for(const interrupt of ['model_gap','receipt_stale']){const s=setup();try{
-    native(s,100000,'smoke');for(let i=1;i<=7;i++)native(s,100000+i*1000);
-    if(interrupt==='model_gap'){
-      for(let ts=108000;ts<=113000;ts+=1000){s.at(ts);s.c.accept(frame(ts));}
-    }else{s.at(113000);s.c.tick();}
-    native(s,114000);
+    confirmed(s);for(let i=1;i<=7;i++)native(s,100000+i*1000);
+    if(interrupt==='model_gap'){ // Frames keep arriving but no model report for longer than the 15 s clear gap.
+      for(let ts=108000;ts<=122000;ts+=1000){s.at(ts);s.c.accept(frame(ts));}native(s,123000);
+    }else{ // Delivery stalls past the receipt bound; source timestamps stay continuous, so no observation gap is involved.
+      s.at(113000);s.c.tick();s.at(113500);s.c.accept(frame(108000));report(s,108000);
+    }
     assert.equal(s.c.result().incident_history.clear_observations,1,interrupt);
     assert.equal(s.c.result().priority.level,'inspect_urgently');
+  }finally{s.store.close();}}
+});
+test('slow clear reports up to 15 s apart release the latch without hiding incident history',()=>{
+  const s=setup();try{
+    confirmed(s);const incident=s.c.result().incident_id;
+    slowClear(s,100000,8000,i=>{if(i<8)assert.equal(s.c.result().priority.reason,'verified_hazard_unresolved',String(i));});
+    const r=s.c.result();
+    assert.notEqual(r.priority.reason,'verified_hazard_unresolved');assert.equal(r.priority.policy_version,'minicpm-only-v3');
+    assert.equal(r.incident_history.clear_evidence_current,true);assert.equal(r.incident_history.clear_observations,8);
+    assert.equal(r.incident_history.model_hazard,true);assert.equal(r.incident_history.latest_hazard.ts_ms,100000);
+    assert.equal(r.incident_id,incident);assert.notEqual(r.detection.state,'confirmed');
+    for(let t=165000;t<=175000;t+=1000){s.at(t);s.c.accept(frame(t));}
+    assert.equal(s.c.result().priority.reason,'verified_hazard_unresolved','a clear report older than 10 s cannot release the alert');
+  }finally{s.store.close();}
+});
+test('clear reports more than 15 s apart never release the latch',()=>{
+  const s=setup();try{
+    confirmed(s);slowClear(s,100000,16000,i=>{const r=s.c.result();
+      assert.equal(r.priority.reason,'verified_hazard_unresolved',String(i));assert.equal(r.incident_history.clear_observations,1,String(i));
+      assert.equal(r.incident_history.clear_evidence_current,false,String(i));});
+  }finally{s.store.close();}
+});
+test('a single model smoke report is unconfirmed and never becomes an urgent or persisted alert',()=>{
+  const s=setup();try{
+    native(s,100000,'smoke');const r=s.c.result();
+    assert.equal(r.priority.reason,'hazard_unconfirmed');assert.equal(r.priority.level,'unknown');
+    assert.equal(r.detection.smoke,'detected');assert.equal(r.incident_history.model_hazard,false);
+    for(let ts=101000;ts<=109000;ts+=1000){native(s,ts);const next=s.c.result();
+      assert.notEqual(next.priority.level,'inspect_urgently',String(ts));assert.equal(next.incident_history.model_hazard,false);}
+    assert.equal(s.c.result().priority.level,'monitor');
+    s.c.disconnect();const next=setup({store:s.store,sessionId:'reconnected'});
+    assert.equal(next.c.result().incident_history.model_hazard,false);assert.notEqual(next.c.result().priority.level,'inspect_urgently');
+  }finally{s.store.close();}
+});
+test('a hazard latches on a second report within 20 s unless three clear reports dismiss the first',()=>{
+  for(const [kinds,latched] of [[['smoke','smoke'],true],[['smoke','negative','smoke'],true],
+    [['material','negative','separate'],true],[['smoke','negative','negative','smoke'],true],
+    [['smoke','negative','negative','negative','smoke'],false]]){
+    const s=setup(),label=kinds.join(',');try{
+      kinds.forEach((kind,i)=>native(s,100000+i*1000,kind));const r=s.c.result();
+      assert.equal(r.incident_history.model_hazard,latched,label);
+      assert.equal(r.priority.level,latched?'inspect_urgently':'unknown',label);
+      if(latched)assert.equal(r.incident_history.latest_hazard.ts_ms,100000+(kinds.length-1)*1000,label);
+      else assert.equal(r.priority.reason,'hazard_unconfirmed',label);
+    }finally{s.store.close();}
+  }
+});
+test('smoke reports alternating with invalid native reports latch on the second smoke report',()=>{
+  const s=setup();try{
+    native(s,100000,'smoke');invalid(s,101000);
+    assert.equal(s.c.result().incident_history.model_hazard,false);assert.equal(s.c.result().priority.reason,'model_report_invalid');
+    native(s,102000,'smoke');const r=s.c.result();
+    assert.equal(r.incident_history.model_hazard,true);assert.equal(r.priority.level,'inspect_urgently');
+    assert.equal(r.incident_history.latest_hazard.ts_ms,102000);
+  }finally{s.store.close();}
+});
+test('pending hazard reports survive uncertain reports, slow cadence and reconnects but expire after 20 s',()=>{
+  for(const [label,steps,latched] of [
+    ['uncertain',s=>{native(s,100000,'smoke');native(s,101000,'uncertain');native(s,102000,'uncertain');native(s,103000,'smoke');},103000],
+    ['12 s apart',s=>{native(s,100000,'smoke');fill(s,101000,112000);native(s,112000,'smoke');},112000],
+    ['reconnect',s=>{native(s,100000,'smoke');s.c.acceptNativeState('reconnecting');s.c.acceptNativeState('listening');native(s,101000,'smoke');},101000],
+    ['25 s apart',s=>{native(s,100000,'smoke');fill(s,101000,125000);native(s,125000,'smoke');},null]]){
+    const s=setup();try{steps(s);const r=s.c.result();
+      assert.equal(r.incident_history.model_hazard,Boolean(latched),label);
+      assert.equal(r.priority.reason,latched?'verified_hazard_unresolved':'hazard_unconfirmed',label);
+      assert.equal(r.incident_history.latest_hazard?.ts_ms??null,latched,label);
+    }finally{s.store.close();}
+  }
+});
+test('a hazard report while latched refreshes the alert so a review of older evidence is rejected',()=>{
+  const s=setup();try{
+    confirmed(s);const incident=s.c.result().incident_id;
+    for(let ts=101000;ts<=105000;ts+=1000)native(s,ts);native(s,106000,'smoke');
+    const r=s.c.result();assert.equal(r.incident_history.latest_hazard.ts_ms,106000);assert.equal(r.priority.reason,'verified_hazard_unresolved');
+    assert.throws(()=>s.c.reviewAlert({incident_id:incident,last_hazard_ts_ms:100000,action:'false_alarm',actor:'tester'}),/alert_updated_review_again/);
+    assert.equal(s.c.result().incident_history.model_hazard,true);assert.equal(s.store.reviews(s.c.sessionId).length,0);
+    s.c.reviewAlert({incident_id:incident,last_hazard_ts_ms:106000,action:'false_alarm',actor:'tester'});
+    assert.equal(s.c.result().incident_history.model_hazard,false);
+  }finally{s.store.close();}
+});
+test('a rejected non-clear report inside a slow clear streak prevents release',()=>{
+  for(const rejected of ['stale','no_image']){const s=setup();try{
+    confirmed(s);slowClear(s,100000,8000,i=>{if(i!==4)return;const ts=s.c.lastTs+500,source=rejected==='stale'?ts-11000:ts;
+      s.at(ts);s.c.accept(frame(ts));
+      s.c.acceptNative({session_id:s.c.sessionId,engine:'minicpm-native-duplex',native_chunks:1,source_ts_ms:ts,assessment_source_ts_ms:source,
+        assessment:row(source,'smoke'),text:'report'},rejected==='stale'?{jpeg:Buffer.from('AQI=','base64')}:undefined);});
+    const r=s.c.result();
+    assert.equal(r.priority.reason,'verified_hazard_unresolved',rejected);assert.equal(r.incident_history.clear_observations,4,rejected);
+    assert.equal(r.incident_history.clear_evidence_current,false,rejected);
   }finally{s.store.close();}}
 });
 
@@ -133,7 +230,7 @@ test('a new uncertain or separate report immediately revokes lighter monitoring'
 });
 test('validated smoke/material remains urgent through darkness and reconnect',()=>{
   for(const kind of ['smoke','material']){const s=setup();try{
-    native(s,100000,kind);assert.equal(s.c.result().priority.level,'inspect_urgently');
+    confirmed(s,kind);assert.equal(s.c.result().priority.level,'inspect_urgently');
     s.at(101000);s.c.accept(frame(101000,{visibility:'degraded'}));
     assert.equal(s.c.result().priority.level,'inspect_urgently');assert.equal(s.c.result().detection.fire,'unknown');
     s.c.disconnect();const next=setup({store:s.store,sessionId:'reconnected'});
@@ -176,7 +273,7 @@ test('upstream loss or retry revokes monitoring immediately but preserves valida
     const s=setup();try{for(const ts of [100000,101000,102000])native(s,ts);s.c.acceptNativeState(state);
       assert.equal(s.c.result().priority.level,'unknown');assert.equal(s.c.result().detection.fire,'unknown');
     }finally{s.store.close();}
-    const h=setup();try{native(h,100000,'material');h.c.acceptNativeState(state);
+    const h=setup();try{confirmed(h,'material');h.c.acceptNativeState(state);
       assert.equal(h.c.result().priority.level,'inspect_urgently');
     }finally{h.store.close();}
   }
@@ -197,4 +294,17 @@ test('a short uploaded clip receives inference without relaxing monitoring evide
     s.c.accept(frame(0));const r=await s.c.finish();assert.equal(calls,1);assert.equal(r.priority.level,'unknown');
     assert.equal(r.detection.fire,'not_detected');
   }finally{scout.close();s.store.close();}
+});
+test('an upload ending on a single unconfirmed smoke report is flagged, while a dismissed one is not',async()=>{
+  for(const [smokeTs,level,reason] of [[12000,'inspect_urgently','hazard_unconfirmed_recording'],[1000,'monitor','no_visual_hazard_observed']]){
+    const scout={configured:true,analyze:async frames=>({mode:'fresh',assessment:{frames:frames.map(f=>{
+      const ts=Number(f.frame_id.slice(6));return row(ts,ts===smokeTs?'smoke':'negative');})}})};
+    const s=setup({streaming:false,mode:'recorded',scout});try{
+      for(let ts=0;ts<=12000;ts+=1000){s.c.accept(frame(ts));await s.c.drain();}
+      if(smokeTs===12000)assert.equal(s.c.result().priority.reason,'hazard_unconfirmed','still processing');
+      const r=await s.c.finish();
+      assert.equal(r.priority.level,level,String(smokeTs));assert.equal(r.priority.reason,reason,String(smokeTs));
+      assert.equal(r.incident_history.model_hazard,false);
+    }finally{s.store.close();}
+  }
 });

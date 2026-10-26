@@ -26,7 +26,8 @@ export class NativeStream {
       const fail=(code)=>{
         if(failed||this.ws!==ws)return;failed=true;clearTimeout(this.connectTimer);this.ready=false;this.sent.clear();
         if(this.closed)return;
-        const transient=code===1013||code===1006&&!/401|403/.test(socketError?.message??'');
+        // 1013: GPU busy draining; 1012: server-side session rotation; 1006: dropped link (not an auth denial).
+        const transient=code===1013||code===1012||code===1006&&!/401|403/.test(socketError?.message??'');
         if(transient&&this.retries<this.retryDelays.length){
           if(this.established)this.deadline=Date.now()+180000;
           const delay=this.retryDelays[this.retries++];this.onState('reconnecting');
@@ -50,7 +51,9 @@ export class NativeStream {
           if(typeof value.text!=='string' || value.text.length>2048 || !Number.isSafeInteger(value.native_chunks))return;
           const evidence=value.assessment? [...this.sent.values()].find(f=>f.ts_ms===value.assessment_source_ts_ms):this.sent.get(value.sequence);
           if(value.assessment && (!evidence || value.assessment.frame_id!==`frame-${evidence.ts_ms}`))return;
-          this.onResult(value,evidence);
+          // Only a delivered result proves the session healthy and refills the retry budget; native_ready alone does not, so a
+          // service that comes up and then crashes on its first inference still runs out of retries instead of looping forever.
+          this.retries=0;this.onResult(value,evidence);
         }catch{this.onState('invalid_response');}
       });
   }

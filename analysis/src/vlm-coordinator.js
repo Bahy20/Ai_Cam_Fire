@@ -2,9 +2,10 @@ import {randomUUID} from 'node:crypto';
 import {qualifyModelInvestigation,scoutHandheldAssessmentApplies} from '../../worker/src/investigation.js';
 import {toInvestigation,MINICPM_MODEL,MINICPM_REVISION} from './minicpm.js';
 
-export const POLICY_VERSION='minicpm-only-v2';
-const AGE=10000,RECEIPT=5000;
+export const POLICY_VERSION='minicpm-only-v3';
+const AGE=10000,RECEIPT=5000,HAZARD_CONFIRM=2,HAZARD_CONFIRM_MS=20000,HAZARD_REFUTE=3,CLEAR_GAP=15000;
 const clearObservation=row=>['flame','smoke','burning_material','occlusion','flame_relation'].every(k=>row[k]==='not_observed');
+const hazardObservation=row=>row.smoke==='present'||row.burning_material==='present'||row.flame==='present'&&row.flame_relation==='separate';
 function lighterSupported(q,frames){
   const scene=q.scene_assessment;
   return scoutHandheldAssessmentApplies(scene,{frames,observations:q.observations,
@@ -27,7 +28,7 @@ export class VlmCoordinator {
     this.lastReview=previous?.incident_history?.last_review??null;
     this.connected=true;this.current=null;this.lastTs=null;this.receivedAt=null;this.invalid=false;
     this.generation=0;this.barrier=-Infinity;this.rows=[];this.images=[];this.scene=null;this.lastRow=null;
-    this.clearRows=[];this.lastAcceptedTs=-Infinity;
+    this.clearRows=[];this.lastAcceptedTs=-Infinity;this.pendingHazards=[];
     this.native={state:'connecting',started_at_ms:this.now(),assessment:null,assessment_ts_ms:null};
     this.inference=null;this.running=null;this.lastDispatch=-Infinity;this.lastAnalyzedTs=-Infinity;this.eof=false;
     store.start(sessionId,cameraId,mode);
@@ -38,7 +39,10 @@ export class VlmCoordinator {
   currentRow(){return this.usable()&&this.lastRow&&this.sourceNow()-this.lastRow.frame.ts_ms<=AGE?this.lastRow.row:null;}
   sceneCurrent(){return this.usable()&&this.scene&&this.scene.generation===this.generation&&
     this.sourceNow()-this.scene.startTs<=AGE;}
-  clearEvidenceCurrent(){return Boolean(this.clearRows.length===8&&this.sceneCurrent()&&this.scene.negative);}
+  // Releasing a latched alert needs eight consecutive clear reports ending in the current one. It does not also need
+  // the monitoring interval, which slow (>4 s) model cadence never forms; that would pin an old alert forever.
+  clearEvidenceCurrent(){const row=this.currentRow();
+    return Boolean(this.clearRows.length===8&&row&&clearObservation(row)&&this.clearRows.at(-1).ts_ms===this.lastRow.frame.ts_ms);}
   accept(frame){
     if(!this.connected)return this.result();
     if(!Number.isSafeInteger(frame.ts_ms)||frame.ts_ms<0||!Array.isArray(frame.frame_wh)||
@@ -72,15 +76,21 @@ export class VlmCoordinator {
     for(let i=0;i<rows.length;i++){
       const row=rows[i],frame=frames[i],ts=frame.ts_ms;
       if(ts<=this.barrier||ts<=this.lastAcceptedTs||this.sourceNow()-ts>AGE||ts>this.sourceNow()||
-        this.lastRow&&ts<=this.lastRow.frame.ts_ms)continue;
+        this.lastRow&&ts<=this.lastRow.frame.ts_ms){if(!clearObservation(row))this.clearRows=[];continue;}
       this.lastRow={row,frame};this.lastAcceptedTs=ts;
       if(clearObservation(row)){
-        if(this.clearRows.length&&ts-this.clearRows.at(-1).ts_ms>5000)this.clearRows=[];
+        if(this.clearRows.length&&ts-this.clearRows.at(-1).ts_ms>CLEAR_GAP)this.clearRows=[];
         this.clearRows=[...this.clearRows,{frame_id:frame.frame_id,ts_ms:ts}].slice(-8);
       }else this.clearRows=[];
       this.rows=[...this.rows,{row,frame}].filter(v=>v.frame.ts_ms>=ts-8000).slice(-12);
       if(row.flame==='present'||row.smoke==='present'||row.burning_material==='present')this.incidentId??=randomUUID();
-      if(row.smoke==='present'||row.burning_material==='present'||row.flame==='present'&&row.flame_relation==='separate'){
+      // One model report can be a hallucination: entering the latch needs a second hazard report within 20 s. Pending
+      // reports survive gaps, invalid/uncertain reports and reconnects; a clear streak of three reports dismisses them.
+      // Once latched, every hazard report refreshes the alert so a review of older evidence is rejected.
+      const hazard=hazardObservation(row);
+      this.pendingHazards=[...this.pendingHazards,...(hazard?[{ts_ms:ts,frame_id:frame.frame_id}]:[])].filter(v=>ts-v.ts_ms<=HAZARD_CONFIRM_MS);
+      if(this.clearRows.length>=HAZARD_REFUTE)this.pendingHazards=[];
+      if(hazard&&(this.hazardLatch||this.pendingHazards.length>=HAZARD_CONFIRM)){
         this.hazardLatch=true;this.latestHazard={ts_ms:ts,frame_id:frame.frame_id,smoke:row.smoke,flame:row.flame,
           burning_material:row.burning_material,description:row.description};
         this.hazardSmoke||=row.smoke==='present';this.hazardFire||=row.flame==='present'||row.burning_material==='present';
@@ -115,6 +125,7 @@ export class VlmCoordinator {
       this.barrier=Math.max(this.barrier,this.sourceNow());
       this.publish('native_invalid_report');return;
     }
+    let applied=false;
     if(report.assessment&&image?.jpeg&&this.usable()){
       const ts=report.assessment_source_ts_ms;
       if(Number.isSafeInteger(ts)&&ts>this.barrier&&ts>this.lastAcceptedTs&&ts<=this.sourceNow()&&this.sourceNow()-ts<=AGE&&
@@ -122,7 +133,7 @@ export class VlmCoordinator {
         const frame={frame_id:`frame-${ts}`,ts_ms:ts,frame_wh:report.frame_wh??this.current.frame_wh,
           roles:['recent'],image_b64:image.jpeg.toString('base64')};
         try{
-          this.applyRows([report.assessment],[frame]);
+          this.applyRows([report.assessment],[frame]);applied=true;
           this.native.assessment=report.assessment;this.native.assessment_ts_ms=ts;
           this.inference={mode:'fresh',source:'modal',model:MINICPM_MODEL,revision:MINICPM_REVISION,engine:report.engine,
             elapsed_ms:report.elapsed_ms,completed_at_ms:this.now(),purpose:'native_scene',validation_errors:[],frame_ids:[frame.frame_id],native_chunks:report.native_chunks};
@@ -131,6 +142,8 @@ export class VlmCoordinator {
           this.barrier=Math.max(this.barrier,this.sourceNow());}
       }
     }
+    // A rejected (stale, unusable or pre-barrier) non-clear report still interrupts a release streak.
+    if(report.assessment&&!applied&&!clearObservation(report.assessment))this.clearRows=[];
     this.publish('native_result');
   }
   maybeAnalyze({final=false}={}){
@@ -148,7 +161,8 @@ export class VlmCoordinator {
       // A translated prose observation cannot substitute for the strict per-image enums.
       toInvestigation(response.assessment,frames);
       this.store.inference(this.sessionId,{...metadata,raw:String(response.provider_raw??'').slice(0,32768),archive});
-      if(!this.connected||generation!==this.generation||!this.usable()||this.sourceNow()-frames[0].ts_ms>AGE)return;
+      if(!this.connected||generation!==this.generation||!this.usable()||this.sourceNow()-frames[0].ts_ms>AGE){
+        if(!response.assessment.frames.every(clearObservation))this.clearRows=[];return;}
       this.applyRows(response.assessment.frames,frames);this.inference=metadata;this.publish('assessment');
     }).catch(error=>{
       const failure={mode:'failed',source:'modal',model:MINICPM_MODEL,error:error.message,elapsed_ms:this.now()-started,usage:null,validation_errors:[]};
@@ -162,10 +176,13 @@ export class VlmCoordinator {
     const answer=(level,reason,label)=>({policy_version:POLICY_VERSION,scope:this.mode==='live'?'live':'observed_interval',level,reason,label});
     if(!this.connected)return answer('unknown','disconnected','Analysis connection unavailable');
     if(this.hazardLatch&&!this.clearEvidenceCurrent()){
-      const current=this.currentRow();const present=current&&(current.smoke==='present'||current.burning_material==='present'||current.flame==='present'&&current.flame_relation==='separate');
+      const current=this.currentRow(),present=current&&hazardObservation(current);
       return answer(this.siteHazard?'escalate':'inspect_urgently','verified_hazard_unresolved',present?
         'Fire or smoke observed — inspect urgently':'Earlier fire/smoke alert unresolved — operator review required');
     }
+    // A finished recording cannot supply the confirming report a single late hazard report waits for.
+    if(this.mode==='recorded'&&this.eof&&this.pendingHazards.length)return answer('inspect_urgently','hazard_unconfirmed_recording',
+      'Possible smoke or fire in the recording (unconfirmed) — review the clip');
     if(!this.usable()){
       const dark=this.invalid&&(this.current?.metrics?.quality_reasons??[]).some(r=>['uniform_extreme_luminance','insufficient_scene_illumination'].includes(r));
       return dark?answer('unknown','camera_dark_or_blank','Camera image is dark or blank — check the camera and lighting'):
@@ -177,6 +194,8 @@ export class VlmCoordinator {
     if(!row&&this.streaming&&this.native.state==='unavailable')return answer('unknown','model_unavailable','Live analysis connection failed — reconnect the webcam');
     if(!row&&this.streaming&&this.native.validation_error)return answer('unknown','model_report_invalid','Live model report incomplete — waiting for a valid report');
     if(!row)return answer('unknown','assessment_required','Waiting for a current valid visual assessment');
+    if(row.flame!=='present'&&(row.smoke==='present'||row.burning_material==='present'))
+      return answer('unknown','hazard_unconfirmed','Possible smoke or fire reported — confirming with the next observation');
     if(row.occlusion!=='not_observed')return answer('unknown','scene_uncertain','Scene unclear — review required');
     if(this.siteHazard&&row.flame==='present')return answer('escalate','reviewed_site_hazard','Flame in a hazardous location — inspect urgently');
     if(this.sceneCurrent()&&this.scene.negative)return answer('monitor','no_visual_hazard_observed','No flame or smoke observed in recent scene — monitor');
@@ -194,7 +213,7 @@ export class VlmCoordinator {
     const available=this.usable();
     return {version:1,session_id:this.sessionId,camera_id:this.cameraId,mode:this.mode,incident_id:this.incidentId,
       source_ts_ms:this.lastTs,received_at_ms:this.receivedAt,emitted_at_ms:this.now(),
-      detection:{source:'minicpm',state:this.hazardLatch&&!this.clearEvidenceCurrent()?'confirmed':row?.flame==='present'?'watch':fresh?'idle':'unknown',
+      detection:{source:'minicpm',state:this.hazardLatch&&!this.clearEvidenceCurrent()?'confirmed':row&&(row.flame==='present'||hazardObservation(row))?'watch':fresh?'idle':'unknown',
         fire:status(row?.flame),smoke:status(row?.smoke),smoke_status:status(row?.smoke),scene:sceneCurrent?this.scene.category:'uncertain'},
       priority:this.priority(),inference:this.inference,
       cause:{status:'unknown',hypothesis:null,verified_cause:'unknown',supporting_frame_ids:[],observations:[]},
@@ -222,6 +241,7 @@ export class VlmCoordinator {
     this.store.review(this.sessionId,review);
     const invalid=this.invalid;
     this.lastReview=review;this.hazardLatch=false;this.hazardSmoke=false;this.hazardFire=false;this.incidentId=null;this.latestHazard=null;
+    this.pendingHazards=[];
     this.gap('operator_review');this.invalid=invalid;
     this.native={state:'connecting',started_at_ms:this.now(),assessment:null,assessment_ts_ms:null};
     this.inference=null;this.publish('operator_review');return this.result();

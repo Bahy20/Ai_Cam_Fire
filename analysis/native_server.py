@@ -2,6 +2,9 @@
 import asyncio,contextlib,hmac,io,json,re,struct,time
 from PIL import Image
 
+# Bounded session length; on reaching it the client is told to reconnect (1012 service restart).
+SESSION_LIMIT_S=600
+
 def decode_packet(data,session_id):
     if not isinstance(data,bytes) or not 8<=len(data)<=2*1024*1024:raise ValueError('native_frame_size')
     size=struct.unpack('>I',data[:4])[0]
@@ -13,7 +16,7 @@ def decode_packet(data,session_id):
     if not jpeg.startswith(b'\xff\xd8') or not jpeg.endswith(b'\xff\xd9'):raise ValueError('native_frame_jpeg')
     return {**meta,'jpeg':jpeg}
 
-def create_app(session_factory,token,info=None,inference_context=contextlib.nullcontext,engine='minicpm-native-duplex',mode='native_duplex'):
+def create_app(session_factory,token,info=None,inference_context=contextlib.nullcontext,engine='minicpm-native-duplex',mode='native_duplex',session_limit_s=SESSION_LIMIT_S):
     from fastapi import FastAPI,WebSocket,WebSocketDisconnect
     if not token:raise ValueError('native_service_token_required')
     app=FastAPI();lock=asyncio.Lock()
@@ -38,7 +41,7 @@ def create_app(session_factory,token,info=None,inference_context=contextlib.null
             await ws.close(code=1008);return
         if lock.locked():
             await ws.accept();await ws.close(code=1013,reason='Previous live inference is finishing');return
-        await lock.acquire();reader=None;worker=None;session=None
+        await lock.acquire();reader=None;worker=None;session=None;close_code,close_reason=1000,None
         closed=asyncio.Event();available=asyncio.Event();latest=None;received=0;dropped=0
         try:
             await ws.accept()
@@ -75,7 +78,8 @@ def create_app(session_factory,token,info=None,inference_context=contextlib.null
                     await ws.send_json(result)
                     await asyncio.sleep(max(0,1-(time.monotonic()-started)))
             reader=asyncio.create_task(read());worker=asyncio.create_task(consume())
-            await asyncio.wait_for(asyncio.wait([reader,worker],return_when=asyncio.FIRST_COMPLETED),600)
+            done,_=await asyncio.wait([reader,worker],timeout=session_limit_s,return_when=asyncio.FIRST_COMPLETED)
+            if not done:close_code,close_reason=1012,'session_rotation'
             for task in (reader,worker):
                 if task.done() and not task.cancelled():task.result()
         except (WebSocketDisconnect,asyncio.TimeoutError):pass
@@ -96,6 +100,6 @@ def create_app(session_factory,token,info=None,inference_context=contextlib.null
                 except Exception:pass
             if session and hasattr(session,'close'):session.close()
             elif session and hasattr(getattr(session,'duplex',None),'set_session_stop'):session.duplex.set_session_stop()
-            with contextlib.suppress(Exception):await ws.close()
+            with contextlib.suppress(Exception):await ws.close(code=close_code,reason=close_reason)
             lock.release()
     return app

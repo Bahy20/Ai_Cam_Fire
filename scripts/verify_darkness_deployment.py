@@ -56,7 +56,7 @@ async def replay(config,cookie):
         'results':results,'errors':errors,'source_video_seconds_by_timestamp':frames},indent=2),encoding='utf-8')
     assert not errors,errors
     scored=[r for r in results if frames.get(r.get('source_ts_ms')) is not None]
-    assert scored and all(r['priority']['policy_version']=='minicpm-only-v1' and r['detection']['source']=='minicpm' for r in scored)
+    assert scored and all(r['priority']['policy_version']=='minicpm-only-v3' and r['detection']['source']=='minicpm' for r in scored)
     reports={r['native_stream']['assessment_ts_ms']:r['native_stream']['assessment'] for r in scored
              if (r.get('native_stream') or {}).get('assessment')}
     mapped=[{'video_s':frames.get(ts),'row':row} for ts,row in reports.items() if frames.get(ts) is not None]

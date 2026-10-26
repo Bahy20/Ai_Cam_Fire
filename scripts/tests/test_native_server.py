@@ -32,6 +32,16 @@ class NativeServerTests(unittest.TestCase):
                         with self.assertRaises(WebSocketDisconnect) as failure:new.receive_json()
                         self.assertEqual(failure.exception.code,1013)
                 finally:release.set()
+    def test_session_cap_closes_with_service_restart_and_releases_the_gpu(self):
+        app=create_app(lambda sid:NativeSession(FakeDuplex(),sid),'test-token',session_limit_s=0.2)
+        with TestClient(app) as client:
+            for _ in range(2):
+                with client.websocket_connect('/v1/stream',headers={'Authorization':'Bearer test-token'}) as ws:
+                    ws.send_json({'type':'start','session_id':'session'})
+                    self.assertEqual(ws.receive_json()['type'],'native_ready')
+                    with self.assertRaises(WebSocketDisconnect) as rotated:ws.receive_json()
+                    self.assertEqual((rotated.exception.code,rotated.exception.reason),(1012,'session_rotation'))
+            self.assertFalse(client.get('/health').json()['session_active'])
     def test_protocol_rejects_invalid_and_stale_frames(self):
         self.assertEqual(decode_packet(packet(),'session')['sequence'],1)
         for data in (b'invalid',packet(1000)):

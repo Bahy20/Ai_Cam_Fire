@@ -26,6 +26,8 @@ test('live alert review enforces owner, origin and latest evidence, audits and r
     while(!messages.some(x=>x.type==='ready'))await new Promise(r=>setTimeout(r,5));
     const sid=messages.find(x=>x.type==='ready').assessment_session_id;
     ws.send(encodeFrame({session_id:'source',sequence:1,ts_ms:clock},Buffer.from([255,216,255,217])));
+    while(!messages.some(x=>x.priority?.reason==='hazard_unconfirmed'))await new Promise(r=>setTimeout(r,5));
+    clock+=500;ws.send(encodeFrame({session_id:'source',sequence:2,ts_ms:clock},Buffer.from([255,216,255,217])));
     while(!messages.some(x=>x.incident_history?.model_hazard))await new Promise(r=>setTimeout(r,5));
     const incident=messages.find(x=>x.incident_history?.model_hazard).incident_id,url=`/v1/live/${sid}/review`;
     const payload={incident_id:incident,last_hazard_ts_ms:clock,action:'false_alarm'};

@@ -4,10 +4,12 @@ import { once } from 'node:events';
 import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn } from 'node:child_process';
 import WebSocket from 'ws';
 import { buildServer } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { encodeFrame } from '../src/protocol.js';
+import { FrameReader } from '../src/frame-reader.js';
 
 test('native upstream receives quality-checked camera frames without a detector',async()=>{
   const dir=await mkdtemp(join(tmpdir(),'fire-native-'));let forwarded=0,closed=false;
@@ -111,4 +113,24 @@ test('uploads without model evidence remain unknown and expose a timeline',async
     assert.equal(result.result.priority.level,'unknown');assert.ok(result.timeline.length>=3);
     assert.deepEqual(result.inferences,[]);
   } finally{await app.close();store.close();await rm(dir,{recursive:true,force:true});}
+});
+test('health shows a crash-looping frame reader through restarts and the last failure, not availability',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'fire-health-'));const store=new Store(':memory:');
+  const frameReader=new FrameReader({spawn:(cmd,args,opts)=>spawn(process.execPath,['-e','process.exit(3)'],opts),restartDelayMs:0}),exited=once(frameReader.child,'exit');
+  const app=await buildServer({token:'test',dataDir:dir,store,frameReader,scout:{configured:false}});
+  const stub=await buildServer({token:'test',dataDir:dir,store,frameReader:{close(){}},scout:{configured:false}});
+  try{
+    let h=(await stub.inject({url:'/health'})).json();
+    assert.equal(h.frame_reader_available,true);assert.equal(h.frame_reader_restarts,0);assert.equal(h.frame_reader_last_failure,null);
+    await exited;h=(await app.inject({url:'/health'})).json();
+    assert.equal(h.frame_reader_available,true,'a dead worker is replaced on demand, so the reader stays available');
+    assert.equal(typeof h.frame_reader_restarts,'number');assert.equal(h.frame_reader_restarts,0);
+    assert.equal(h.frame_reader_last_failure.code,'frame_reader_exited');assert.equal(typeof h.frame_reader_last_failure.at_ms,'number');
+    for(const restarts of [1,2]){
+      await assert.rejects(frameReader.warmup(),{message:/^frame_reader_(exited|pipe_failed)$/});
+      h=(await app.inject({url:'/health'})).json();assert.equal(h.frame_reader_restarts,restarts);assert.equal(h.frame_reader_available,true);
+    }
+    assert.match(h.frame_reader_last_failure.code,/^frame_reader_(exited|pipe_failed)$/);
+  }finally{await app.close();await stub.close();store.close();await rm(dir,{recursive:true,force:true});}
+  assert.equal(frameReader.closed,true);
 });
