@@ -13,7 +13,7 @@ OUT=ROOT/'.hermes/minicpm-replacement'
 MODEL='openbmb/MiniCPM-o-4_5'
 POLICY='minicpm-only-v5'
 
-async def live(config,cookie,fixture=None,label='lighter',require_fresh=True):
+async def live(config,cookie,fixture=None,label='lighter',require_fresh=True,forbid_priority=None):
     fixture=fixture or ROOT/'.hermes/minicpm-recording-20261023/camera-66s.jpg'
     im=Image.open(fixture).convert('RGB')
     im.thumbnail((640,480));data=io.BytesIO();im.save(data,format='JPEG',quality=80)
@@ -34,7 +34,10 @@ async def live(config,cookie,fixture=None,label='lighter',require_fresh=True):
                 elif value['type']=='error':errors.append(value)
         reader=asyncio.create_task(receive())
         try:
-            for seq in range(1,151):
+            # A cold GPU answers model_starting for up to ~5 minutes, so keep sending until a fresh call or the deadline.
+            deadline=time.monotonic()+330;seq=0
+            while time.monotonic()<deadline:
+                seq+=1
                 await ws.send(frame_packet(session,seq,time.time_ns()//1000000,data.getvalue()))
                 await asyncio.sleep(.4)
                 if first_fresh and time.monotonic()-first_fresh>4:break
@@ -47,8 +50,15 @@ async def live(config,cookie,fixture=None,label='lighter',require_fresh=True):
     fresh=[r['inference'] for r in results if r.get('inference') and r['inference']['mode']=='fresh']
     assert not errors,errors
     if require_fresh:assert fresh,'No fresh MiniCPM WSS inference'
+    if forbid_priority:assert results[-1]['priority']['level']!=forbid_priority,(label,results[-1]['priority'],fresh[-1])
     assert all(r['model']==MODEL and r['source']=='modal' for r in fresh)
     print(json.dumps({'fixture':label,'wss_results':len(results),'fresh_model':fresh[-1]['model'] if fresh else None,'last_priority':results[-1]['priority']}),flush=True)
+
+def login(base,code):
+    # Each new tester login is a new tester camera, so an alert latched by one check cannot carry into the next.
+    s=requests.Session()
+    r=s.post(base+'/testing/login',headers={'Origin':base},json={'code':code},timeout=30);r.raise_for_status()
+    return '; '.join(k+'='+v for k,v in s.cookies.items())
 
 def main():
     OUT.mkdir(exist_ok=True)
@@ -80,7 +90,9 @@ def main():
     print(json.dumps({'fresh_upload_calls':len(fresh),'failed_upload_calls':len(value['inferences'])-len(fresh),
                       'result_priority':value['result']['priority']}),flush=True)
     cookie='; '.join(k+'='+v for k,v in s.cookies.items())
-    asyncio.run(live(config,cookie,require_fresh=False))
+    # Burning wood first warms the GPU and latches an unresolved alert on its tester camera, so the lighter runs under a
+    # fresh login (a new camera); it needs a fresh call and must not be urgent (policy v5, any caller).
     asyncio.run(live(config,cookie,ROOT/'test_images/fire1.jpg',label='burning-wood'))
+    asyncio.run(live(config,login(base,config['tester_code']),forbid_priority='inspect_urgently'))
 
 if __name__=='__main__':main()
