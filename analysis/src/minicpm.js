@@ -2,6 +2,7 @@ import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {fileURLToPath} from 'node:url';
 import {resolve} from 'node:path';
+import {pythonPath} from './frame-reader.js';
 
 export const MINICPM_MODEL='openbmb/MiniCPM-o-4_5';
 export const MINICPM_REVISION='d59117d19ddb8a28a62f1b5f4e3b34ac48d510a4';
@@ -39,7 +40,7 @@ export function minicpmEnv(env=process.env) {
   return Object.fromEntries(Object.entries(env).filter(([name,value])=>value!==undefined&&(/^MODAL_/i.test(name)||!/TOKEN|SECRET|CODE|KEY|PASSWORD/i.test(name))));
 }
 export class MiniCPM {
-  constructor({requestImpl,python=process.env.FIREGUARD_PYTHON??resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python')}={}){
+  constructor({requestImpl,python=pythonPath()??resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python')}={}){
     Object.assign(this,{requestImpl,python});this.model=MINICPM_MODEL;this.source='modal';this.sceneOnly=true;
     this.tail=Promise.resolve();this.shutdown=new AbortController();this.child=null;this.pending=null;this.nextId=0;
   }

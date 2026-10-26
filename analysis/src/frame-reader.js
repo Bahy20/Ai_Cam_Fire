@@ -7,6 +7,11 @@ const root=fileURLToPath(new URL('../../',import.meta.url));
 // (names matched case-insensitively, as on Windows), never a name that looks like a secret.
 const childEnvNames=new Set(['PATH','SYSTEMROOT','TEMP','TMP','TMPDIR','HOME','USERPROFILE','LANG','LC_ALL',
   'PYTHONUNBUFFERED','PYTHONPATH','OMP_NUM_THREADS','VIRTUAL_ENV']);
+// A relative FIREGUARD_PYTHON (e.g. ..\.venv\Scripts\python.exe) is meant from the caller's directory, but the worker is
+// spawned with cwd at the repo root, so resolve it here; a bare command name (python3) is left for PATH lookup.
+export function pythonPath(value=process.env.FIREGUARD_PYTHON) {
+  return value&&/[\\/]/.test(value)?resolve(value):value;
+}
 export function childEnv(env=process.env) {
   return Object.fromEntries(Object.entries(env).filter(([name,value])=>value!==undefined&&childEnvNames.has(name.toUpperCase())&&
     !/TOKEN|SECRET|CODE|KEY|PASSWORD/i.test(name)));
@@ -16,7 +21,7 @@ export function childEnv(env=process.env) {
 // So `closed` cannot show a crash loop: `restarts` counts respawns after the first spawn and `lastFailure` keeps the most
 // recent worker failure ({code,at_ms}, kept after recovery; close() is not a failure) for /health.
 export class FrameReader {
-  constructor({python=process.env.FIREGUARD_PYTHON??resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python'),
+  constructor({python=pythonPath()??resolve(root,process.platform==='win32'?'.venv/Scripts/python.exe':'.venv/bin/python'),
     script=resolve(root,'analysis/frame_reader.py'),spawn:spawnChild=spawn,timeoutMs=60000,restartDelayMs=1000}={}) {
     Object.assign(this,{python,script,spawnChild,timeoutMs,restartDelayMs});
     this.requests=new Map();this.nextId=0;this.closed=false;this.diagnostics='';this.child=null;this.spawnedAt=-Infinity;this.restartTimer=null;

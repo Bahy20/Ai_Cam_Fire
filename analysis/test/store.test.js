@@ -13,7 +13,8 @@ const live=(level='monitor',extra={})=>({mode:'live',priority:{level,reason:'sce
   incident_history:{model_hazard:false,clear_evidence_current:false},view:{status:'available_for_analysis'},
   native_stream:{state:'streaming',startup_elapsed_ms:0},...extra});
 const jpeg=(ts,bytes=20)=>({ts_ms:ts,frame_id:`frame-${ts}`,image_b64:Buffer.alloc(bytes,ts%256).toString('base64')});
-const files=async dir=>existsSync(dir)?(await readdir(dir,{recursive:true})).sort():[];
+// Windows lists nested entries with backslashes; compare with forward slashes on every platform.
+const files=async dir=>existsSync(dir)?(await readdir(dir,{recursive:true})).map(p=>p.replaceAll('\\','/')).sort():[];
 
 test('periodic live publishes insert events only on significant changes and heartbeats',()=>{
   let clock=1000000;const store=new Store(':memory:',{now:()=>clock});

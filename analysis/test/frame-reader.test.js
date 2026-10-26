@@ -4,8 +4,9 @@ import { EventEmitter,once } from 'node:events';
 import { spawn,execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
+import { join,resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { FrameReader,childEnv } from '../src/frame-reader.js';
+import { FrameReader,childEnv,pythonPath } from '../src/frame-reader.js';
 
 const ready={ready:true,mode:'pixel_quality_only'};
 const jpeg=python=>execFileSync(python,['-c',"import io,base64,sys;from PIL import Image;b=io.BytesIO();Image.new('RGB',(64,48),(90,120,150)).save(b,'JPEG');sys.stdout.write(base64.b64encode(b.getvalue()).decode())"]).toString();
@@ -127,7 +128,13 @@ test('the Python worker environment keeps interpreter variables and drops every 
     "result:{token:process.env.FIREGUARD_TOKEN??null,code:process.env.TESTER_ACCESS_CODE??null,path:process.env.PATH??null}})+'\\n'))";
   const reader=new FrameReader({spawn:(cmd,args,opts)=>spawn(process.execPath,['-e',report],opts)});
   try{
-    assert.ok(childEnv().PATH);assert.equal(childEnv().FIREGUARD_TOKEN,undefined);
+    // Windows spells it Path; process.env is case-insensitive there but the copied object is not.
+    assert.ok(Object.keys(childEnv()).some(name=>name.toUpperCase()==='PATH'));assert.equal(childEnv().FIREGUARD_TOKEN,undefined);
     assert.deepEqual(await reader.warmup(),{token:null,code:null,path:process.env.PATH});
   }finally{reader.close();names.forEach((name,i)=>{if(saved[i]===undefined)delete process.env[name];else process.env[name]=saved[i];});}
+});
+
+test('a relative FIREGUARD_PYTHON resolves from the caller directory, a bare command stays a PATH lookup',()=>{
+  assert.equal(pythonPath(join('..','.venv','python')),resolve('..','.venv','python'));
+  assert.equal(pythonPath('python3'),'python3');assert.equal(pythonPath(''),'');
 });

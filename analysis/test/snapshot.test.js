@@ -37,7 +37,8 @@ test('first start without backup creates an empty data directory',async()=>{
 });
 
 const jpeg=(ts,bytes=4)=>({ts_ms:ts,frame_id:`frame-${ts}`,image_b64:Buffer.alloc(bytes,ts).toString('base64')});
-const listing=async dir=>(await readdir(dir,{recursive:true})).sort();
+// Windows lists nested entries with backslashes; compare with forward slashes on every platform.
+const listing=async dir=>(await readdir(dir,{recursive:true})).map(p=>p.replaceAll('\\','/')).sort();
 
 test('snapshots mirror evidence: evictions propagate, resized copies are repaired and temporary files are skipped',async()=>{
   const root=await mkdtemp(join(tmpdir(),'fireguard-mirror-'));let store,restored;
