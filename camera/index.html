@@ -1,0 +1,79 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FireGuard · Camera</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui;background:#101719;color:#e8efec}body{max-width:1100px;margin:40px auto;padding:0 24px}header{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #34413d;padding-bottom:20px}h1{font-size:24px;letter-spacing:-.5px}small,.subtle{color:#a1b4ac}main{display:grid;grid-template-columns:3fr 2fr;gap:24px;margin-top:26px}.preview{min-height:300px;background:#080e10;border:1px solid #34413d;border-radius:12px;overflow:hidden}img{display:block;width:100%;min-height:240px;object-fit:contain}section{background:#182224;border:1px solid #34413d;border-radius:12px;padding:22px;margin-bottom:14px}h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:#a1b4ac;margin:0 0 14px}.value{font-size:23px;line-height:1.35}button,input{font:inherit;padding:10px 16px;border-radius:7px;border:1px solid #536861;background:#23352e;color:#e8efec}button{cursor:pointer}button.primary{background:#c9e7a6;color:#162219;border:0}input{width:50px}nav{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:18px 0}#priority[data-level=monitor]{color:#c9e7a6}#priority[data-level=pending]{color:#f6d38b}#priority[data-level=inspect_urgently],#priority[data-level=escalate]{color:#ff9a85}pre{white-space:pre-wrap;font:12px monospace;max-height:240px;overflow:auto}details{margin-top:18px}@media(max-width:720px){main{grid-template-columns:1fr}}</style>
+<header><div><h1>FireGuard</h1><small>Live camera assessment</small></div><span id="connection">Stopped</span></header>
+<main><div><div class="preview"><img id="preview" alt="Camera preview appears after you start the camera"></div><nav><label>Camera <input id="index" type="number" min="0" max="16" value="0"></label><button class="primary" id="start">Start camera</button><button id="stop">Stop</button></nav><p class="subtle" id="info">Camera footage is sent to the analysis service.</p></div>
+<div><section><h2>Detection</h2><div class="value" id="detection">Waiting for video</div></section><section><h2>Possible cause</h2><div id="cause">Unknown</div></section><section><h2>Operator priority</h2><div class="value" id="priority">Not assessed</div><p class="subtle" id="reason"></p></section></div></main>
+<details><summary>Live assessment details</summary><pre id="details"></pre></details>
+<section class="upload-panel" aria-labelledby="upload-title">
+<h2 id="upload-title">Analyze a recorded video</h2>
+<p class="subtle">Choose an MP4, MOV or AVI file, up to 250 MiB and 10 minutes. Maximum resolution: 1920 × 1080.</p>
+<form id="upload-form"><label for="video-file">Video file</label><input id="video-file" name="video" type="file" accept=".mp4,.mov,.avi,video/mp4,video/quicktime,video/x-msvideo" required><button class="primary" id="analyze" type="submit">Analyze video</button></form>
+<p class="subtle endpoint">HTTP endpoint: <code>__HTTP_ENDPOINT__</code></p>
+<progress id="upload-progress" max="100" value="0" hidden aria-label="Video upload progress"></progress>
+<p id="upload-status" role="status" aria-live="polite">Select a video to begin.</p>
+<button id="check-video" type="button" hidden>Check job status</button>
+<div id="video-result" hidden><h2>Video result</h2><p id="video-detection"></p><p class="value" id="video-priority"></p><p id="video-cause"></p><p id="video-warning" class="warning"></p><details><summary>Full video response</summary><pre id="video-details"></pre></details></div>
+</section>
+<style>.upload-panel{margin-top:28px}#upload-form{display:flex;gap:12px;align-items:center;flex-wrap:wrap}#video-file{width:auto;max-width:100%;box-sizing:border-box;flex:1;min-width:200px}button:disabled{opacity:.5;cursor:wait}.endpoint{font-size:12px;overflow-wrap:anywhere}progress{width:100%;accent-color:#c9e7a6}.warning{color:#f6d38b}#video-priority[data-level=monitor]{color:#c9e7a6}#video-priority[data-level=inspect_urgently],#video-priority[data-level=escalate]{color:#ff9a85}</style>
+<script>
+const token='__CONTROL_TOKEN__';let cameraRunning=false,previewTimer=null;
+const $=id=>document.getElementById(id);let videoJob=null,jobTimer=null;
+const errorText=value=>({video_job_busy:'Another video is being analyzed. Try again when it finishes.',video_too_large:'The video exceeds the 250 MiB limit.',analysis_request_timed_out:'The request timed out. If the upload was accepted, it may still be processing.',analysis_service_unavailable:'The analysis service is unavailable. Please try again.',unauthorized:'The analysis service rejected authentication.'}[value]||value||'The request failed.');
+function uploadBusy(busy){$('analyze').disabled=busy;$('video-file').disabled=busy;}
+function showVideoResult(job){
+  const r=job.result;$('video-result').hidden=false;$('video-details').textContent=JSON.stringify(job,null,2);
+  $('video-detection').textContent=r?`Flame: ${r.detection?.fire||'unknown'} · Smoke: ${r.detection?.smoke||'unknown'}`:'No completed assessment is available.';
+  $('video-priority').textContent=r?.priority?.label||'Not assessed';$('video-priority').dataset.level=r?.priority?.level||'unknown';
+  const cause=r?.cause,h=cause?.hypothesis;
+  $('video-cause').textContent=cause?.status==='hypothesis'?`Possible ${h?.ignition_source||'unknown'} ignition using ${h?.ignition_tool||'unknown'}; not verified.`:'Ignition source unknown.';
+  const failures=(job.inferences||[]).filter(i=>i.error||(i.validation_errors||[]).length);
+  $('video-warning').textContent=failures.length?'Scene analysis was incomplete: '+[...new Set(failures.map(i=>i.error||'invalid model response'))].join(', ')+'. Processing completion does not mean Scout successfully assessed this video.':'';
+}
+async function pollVideo(){
+  clearTimeout(jobTimer);$('check-video').hidden=true;
+  try{
+    const response=await fetch('/videos/'+encodeURIComponent(videoJob),{headers:{'x-local-control':token},cache:'no-store'});
+    const job=await response.json();if(!response.ok)throw new Error(errorText(job.error||job.detail));
+    if(['complete','failed','interrupted'].includes(job.status)){
+      $('upload-status').textContent=job.status==='complete'?'Video processing complete.':`Video ${job.status}: ${errorText(job.error)}`;
+      showVideoResult(job);uploadBusy(false);return;
+    }
+    $('upload-status').textContent=`${job.status==='queued'?'Queued':'Analyzing'} · ${job.sampled_frames||0} frames sampled${job.source_ts_ms!=null?' · '+(job.source_ts_ms/1000).toFixed(1)+' seconds processed':''}`;
+    jobTimer=setTimeout(pollVideo,2000);
+  }catch(error){$('upload-status').textContent=error.message;$('check-video').hidden=false;uploadBusy(false);}
+}
+$('check-video').onclick=()=>{uploadBusy(true);void pollVideo();};
+$('upload-form').onsubmit=event=>{
+  event.preventDefault();const file=$('video-file').files[0];if(!file)return;
+  if(!/\.(mp4|mov|avi)$/i.test(file.name)||file.size>250*1024*1024||file.size===0){$('upload-status').textContent='Choose a nonempty MP4, MOV or AVI file up to 250 MiB.';return;}
+  clearTimeout(jobTimer);videoJob=null;uploadBusy(true);$('check-video').hidden=true;$('video-result').hidden=true;
+  $('upload-progress').hidden=false;$('upload-progress').value=0;$('upload-status').textContent='Uploading video…';
+  const request=new XMLHttpRequest();request.open('POST','/videos');request.setRequestHeader('x-local-control',token);request.timeout=300000;
+  request.upload.onprogress=e=>{if(e.lengthComputable){const percent=Math.round(e.loaded/e.total*100);$('upload-progress').value=percent;$('upload-status').textContent=percent===100?'Upload sent; waiting for the analysis service…':`Uploading video… ${percent}%`;}};
+  request.onload=()=>{try{const reply=JSON.parse(request.responseText);if(request.status!==202)throw new Error(errorText(reply.error||reply.detail));if(!reply.id)throw new Error('The analysis service returned no job ID.');videoJob=reply.id;$('upload-progress').hidden=true;void pollVideo();}catch(error){$('upload-status').textContent=error.message;uploadBusy(false);$('upload-progress').hidden=true;}};
+  request.onerror=request.ontimeout=()=>{$('upload-status').textContent='Upload connection failed or timed out. Please try again.';uploadBusy(false);$('upload-progress').hidden=true;};
+  const body=new FormData();body.append('video',file);request.send(body);
+};
+async function action(path){const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json','x-local-control':token},body:JSON.stringify({camera_index:Number(document.querySelector('#index').value)})});if(!r.ok)document.querySelector('#info').textContent=(await r.json()).detail;}
+document.querySelector('#start').onclick=()=>action('/start');document.querySelector('#stop').onclick=()=>action('/stop');
+function schedulePreview(delay){clearTimeout(previewTimer);if(cameraRunning)previewTimer=setTimeout(loadPreview,delay);}
+function loadPreview(){if(!cameraRunning)return;const image=document.querySelector('#preview');
+image.onload=()=>schedulePreview(30);image.onerror=()=>schedulePreview(500);
+image.src='/preview.jpg?t='+Date.now();}
+async function poll(){try{const s=await(await fetch('/status',{cache:'no-store'})).json();const r=s.result;
+document.querySelector('#connection').textContent=s.connection;
+document.querySelector('#info').textContent=s.error?`Status: ${s.error}`:`Captured ${s.captured_frames} frames · Sent ${s.sent_frames} for analysis`;
+if(r){document.querySelector('#detection').textContent=`Flame: ${r.detection.fire.replaceAll('_',' ')} · Smoke: ${r.detection.smoke.replaceAll('_',' ')}`;
+const h=r.cause.hypothesis;
+const observed=[...(r.cause.observations||[])].reverse().find(o=>['material_burning','flame_visible','smoke_visible'].includes(o.kind));
+const observation=observed?` Observed: ${observed.description}`:'';
+document.querySelector('#cause').textContent=r.cause.status==='hypothesis'?
+  `Possible ${h.ignition_source} ignition using ${h.ignition_tool}; not verified.${observation}`:
+  `Ignition source unknown.${observation}`;
+const p=document.querySelector('#priority');p.textContent=r.priority.label;p.dataset.level=r.priority.level;document.querySelector('#reason').textContent=r.priority.level==='monitor'?'Monitoring priority applies to the observed scene.':'';document.querySelector('#details').textContent=JSON.stringify(r,null,2);}
+if(s.running&&!cameraRunning){cameraRunning=true;loadPreview();}
+else if(!s.running&&cameraRunning){cameraRunning=false;clearTimeout(previewTimer);document.querySelector('#preview').removeAttribute('src');}
+}catch{document.querySelector('#connection').textContent='Camera service unavailable';}finally{setTimeout(poll,500);}}poll();
+</script></html>

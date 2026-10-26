@@ -1,0 +1,94 @@
+{
+  "contract_version": 3,
+  "hypothesis": {
+    "action_frame_ids": [],
+    "confidence": "low",
+    "fuel_type": "unknown",
+    "ignition_frame_id": null,
+    "ignition_source": "unknown",
+    "ignition_tool": "unknown"
+  },
+  "observations": [
+    {
+      "description": "The frame is too dark or obscured to make out any details.",
+      "frame_ids": [
+        "frame-2797191424812"
+      ],
+      "kind": "unknown"
+    },
+    {
+      "description": "The frame is too dark or obscured to make out any details.",
+      "frame_ids": [
+        "frame-2797191427012"
+      ],
+      "kind": "unknown"
+    },
+    {
+      "description": "A hand holding a BIC lighter with a visible flame at the tip.",
+      "frame_ids": [
+        "frame-2797191429212"
+      ],
+      "kind": "flame_at_tool"
+    },
+    {
+      "description": "A hand holding a BIC lighter with a visible flame at the tip.",
+      "frame_ids": [
+        "frame-2797191431412"
+      ],
+      "kind": "flame_at_tool"
+    },
+    {
+      "description": "A hand holding a BIC lighter with a visible flame at the tip.",
+      "frame_ids": [
+        "frame-2797191433612"
+      ],
+      "kind": "flame_at_tool"
+    },
+    {
+      "description": "A hand holding a BIC lighter with a visible flame at the tip.",
+      "frame_ids": [
+        "frame-2797191435812"
+      ],
+      "kind": "flame_at_tool"
+    }
+  ],
+  "scene_assertions": [],
+  "tool_assertions": [
+    {
+      "candidate_id": null,
+      "flame_relation": "at_tool_tip",
+      "frame_id": "frame-2797191429212",
+      "occlusion": "not_observed",
+      "secondary_burning": "not_observed",
+      "smoke": "not_observed",
+      "tool_type": "lighter"
+    },
+    {
+      "candidate_id": null,
+      "flame_relation": "at_tool_tip",
+      "frame_id": "frame-2797191431412",
+      "occlusion": "not_observed",
+      "secondary_burning": "not_observed",
+      "smoke": "not_observed",
+      "tool_type": "lighter"
+    },
+    {
+      "candidate_id": null,
+      "flame_relation": "at_tool_tip",
+      "frame_id": "frame-2797191433612",
+      "occlusion": "not_observed",
+      "secondary_burning": "not_observed",
+      "smoke": "not_observed",
+      "tool_type": "lighter"
+    },
+    {
+      "candidate_id": null,
+      "flame_relation": "at_tool_tip",
+      "frame_id": "frame-2797191435812",
+      "occlusion": "not_observed",
+      "secondary_burning": "not_observed",
+      "smoke": "not_observed",
+      "tool_type": "lighter"
+    }
+  ]
+}

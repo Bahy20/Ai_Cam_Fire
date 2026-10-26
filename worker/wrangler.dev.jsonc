@@ -1,0 +1,42 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "fire-guard-api-dev",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "durable_objects": {
+    "bindings": [{ "name": "CAMERA_DO", "class_name": "CameraDO" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CameraDO"] }
+  ],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "fire-guard-db",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // Keep local emulation offline: no AI binding (Workers AI always runs remotely).
+  // Enrichment uses the documented rules fallback without this optional binding.
+  // Retired HTTP inference profiles cannot be selected.
+  "vars": {
+    "APP_ENV": "development",
+    "EVIDENCE_STORAGE": "pi",
+    "CAMERA_CONTEXTS_JSON": "{}",
+    "OPERATOR_ACCESS_ISSUER": "",
+    "OPERATOR_ACCESS_AUD": "",
+    "OPERATOR_POLICY_JSON": "{}",
+    "DETECTOR_PROVIDER": "edge",
+    "VLM_PROVIDER": "workers_ai",
+    "VLM_MODEL": "@cf/meta/llama-4-scout-17b-16e-instruct",
+    "HANDHELD_PRIORITY_ENABLED": "false",
+    "HANDHELD_MODEL_SHA256": "",
+    "SCOUT_HANDHELD_PRIORITY_ENABLED": "false",
+    "SCOUT_HANDHELD_LIVE_TEST_ENABLED": "false"
+  }
+}

@@ -1,0 +1,24 @@
+.venv/
+**/node_modules/
+**/__pycache__/
+.pytest_cache/
+.hermes/
+.wrangler/
+**/.wrangler/
+analysis-data/
+edge-data/
+analysis/.env.local
+analysis/.modal-client.json
+analysis/*.log
+
+# Secrets, local data and backups
+**/.env*
+!**/.env.example
+**/.dev.vars*
+**/.modal-client.json
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+*.log
+_backups/

@@ -1,0 +1,5 @@
+# CPU gateway only; the pinned GPU model image is defined in deploy/modal_app.py.
+opencv-python-headless==5.0.0.93
+numpy==2.4.6
+pillow==12.3.0
+modal==1.6.1

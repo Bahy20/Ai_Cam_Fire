@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "status": "missing",
+  "annotation_scope": "Acquisition template only. No videos or independently annotated held-out corpus have been supplied. These entries are not captured runs or synthetic replacement footage.",
+  "separation_rule": "Hold out complete original videos, capture sessions, and cameras before tuning. Adjacent frames or excerpts of a development clip are not independent held-out footage.",
+  "clips": [
+    {
+      "video": "missing-held-out-smoke.mp4",
+      "asset_path": null,
+      "status": "missing",
+      "split": "held_out",
+      "category": "smoke",
+      "visible_flame_present": null,
+      "actionable_fire_present": null,
+      "priority_expected": null,
+      "duration_ms": null,
+      "visible_flame_onset_ms": null,
+      "actionable_onset_ms": null,
+      "causal_ground_truth": null,
+      "annotation_basis": null
+    },
+    {
+      "video": "missing-held-out-contained.mp4",
+      "asset_path": null,
+      "status": "missing",
+      "split": "held_out",
+      "category": "contained",
+      "visible_flame_present": null,
+      "actionable_fire_present": null,
+      "priority_expected": null,
+      "duration_ms": null,
+      "visible_flame_onset_ms": null,
+      "actionable_onset_ms": null,
+      "causal_ground_truth": null,
+      "annotation_basis": null
+    },
+    {
+      "video": "missing-held-out-material.mp4",
+      "asset_path": null,
+      "status": "missing",
+      "split": "held_out",
+      "category": "material",
+      "visible_flame_present": null,
+      "actionable_fire_present": null,
+      "priority_expected": null,
+      "duration_ms": null,
+      "visible_flame_onset_ms": null,
+      "actionable_onset_ms": null,
+      "causal_ground_truth": null,
+      "annotation_basis": null
+    },
+    {
+      "video": "missing-held-out-reflection.mp4",
+      "asset_path": null,
+      "status": "missing",
+      "split": "held_out",
+      "category": "reflection",
+      "visible_flame_present": null,
+      "actionable_fire_present": null,
+      "priority_expected": null,
+      "duration_ms": null,
+      "visible_flame_onset_ms": null,
+      "actionable_onset_ms": null,
+      "causal_ground_truth": null,
+      "annotation_basis": null
+    },
+    {
+      "video": "missing-held-out-obscured.mp4",
+      "asset_path": null,
+      "status": "missing",
+      "split": "held_out",
+      "category": "obscured",
+      "visible_flame_present": null,
+      "actionable_fire_present": null,
+      "priority_expected": null,
+      "duration_ms": null,
+      "visible_flame_onset_ms": null,
+      "actionable_onset_ms": null,
+      "causal_ground_truth": null,
+      "annotation_basis": null
+    }
+  ]
+}

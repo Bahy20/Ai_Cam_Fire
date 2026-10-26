@@ -1,0 +1,31 @@
+[Unit]
+Description=Fire Guard local YOLO observations (%i)
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=fire-guard
+Group=fire-guard
+WorkingDirectory=/opt/fire
+EnvironmentFile=/etc/fire-guard/%i.env
+Environment=PYTHONUNBUFFERED=1
+Environment=YOLO_CONFIG_DIR=/var/lib/fire-guard/yolo-config
+Environment=MPLCONFIGDIR=/var/lib/fire-guard/matplotlib
+Environment=EDGE_EVIDENCE_DIR=/var/lib/fire-guard/evidence/%i
+ExecStart=/opt/fire/.venv/bin/python -u /opt/fire/edge/agent.py --camera %i --worker ${EDGE_WORKER_URL} --device cpu --fps 1 --timeout 10 --attempts 3 --report /var/lib/fire-guard/%i.json
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+StateDirectory=fire-guard
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
