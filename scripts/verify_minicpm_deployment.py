@@ -11,7 +11,7 @@ from camera.server import frame_packet
 
 OUT=ROOT/'.hermes/minicpm-replacement'
 MODEL='openbmb/MiniCPM-o-4_5'
-POLICY='minicpm-only-v4'
+POLICY='minicpm-only-v5'
 
 async def live(config,cookie,fixture=None,label='lighter',require_fresh=True):
     fixture=fixture or ROOT/'.hermes/minicpm-recording-20261023/camera-66s.jpg'

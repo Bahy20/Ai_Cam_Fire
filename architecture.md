@@ -4,7 +4,7 @@
 Live:   browser /testing or camera/ bridge --WSS /v1/live--> Analysis gateway (Modal CPU, Node)
           --> frame_reader.py: decode + pixel quality (analysis/shared/image_quality.py), up to 3 frames/s
           --> one authenticated WSS --> NativeLive (Modal H100, native MiniCPM-o 4.5 streaming)
-          --> strict per-image report --> VlmCoordinator (policy minicpm-only-v4) --> result over the same WSS
+          --> strict per-image report --> VlmCoordinator (policy minicpm-only-v5) --> result over the same WSS
 
 Upload: POST /v1/videos --> frame_reader.py samples + checks frames --> Vision (Modal L40S, image batches)
           --> VlmCoordinator --> GET /v1/videos/:id
@@ -19,7 +19,7 @@ Upload: POST /v1/videos --> frame_reader.py samples + checks frames --> Vision (
 
 ## Policy
 
-`minicpm-only-v4` reads only strict frame-bound model enums. Monitoring needs three distinct agreeing reports spanning at least 2 s within a bounded support pool. Smoke, burning material or a separate flame latch an urgent hazard that persists through darkness and reconnect until enough consecutive clear reports or an operator review. Lighter monitoring is allowed only for reviewed cameras (`EXPECTED_LIGHTER_CAMERAS`); `HAZARDOUS_CAMERAS` can escalate. Missing, stale, dark, occluded or invalid evidence is `unknown`. Cause is never established. Full rules and verification: `docs/model-only-analysis.md`.
+`minicpm-only-v5` reads only strict frame-bound model enums. Monitoring needs three distinct agreeing reports spanning at least 2 s within a bounded support pool. Smoke, burning material or a separate flame latch an urgent hazard that persists through darkness and reconnect until enough consecutive clear reports or an operator review. Lighter monitoring is allowed only for reviewed cameras (`EXPECTED_LIGHTER_CAMERAS`); `HAZARDOUS_CAMERAS` can escalate. Missing, stale, dark, occluded or invalid evidence is `unknown`. Cause is never established. Full rules and verification: `docs/model-only-analysis.md`.
 
 ## Secrets and deploy
 

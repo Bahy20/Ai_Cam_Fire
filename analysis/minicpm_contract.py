@@ -10,7 +10,8 @@ flame, smoke, burning_material, lighter and occlusion: "present", "not_observed"
 flame_relation: "at_tool_tip", "separate", "not_observed", or "uncertain".
 description: one short sentence (under 300 characters) describing the visible objects and evidence in that image.
 burning_material means other material visibly burning, not a lighter's own flame. A lighter can coexist with burning material or smoke.
-Do not assume a tool is a lighter. Report at_tool_tip only when both the lighter and its flame are visible in that same image.
+Do not assume a tool is a lighter; a match counts as a lighter. Report at_tool_tip only when both the lighter and its flame are visible in that same image.
+Vapor exhaled from a visible vape or e-cigarette is not smoke: report smoke only for smoke not explained by a visible vape.
 not_observed means not visible; uncertain means the image cannot establish the finding. Occlusion means relevant scene evidence is obscured.
 Do not copy a finding to other frames. Do not infer ignition cause, risk, urgency, safety or instructions.
 Image IDs in exact order: '''+json.dumps(ids)
@@ -70,6 +71,7 @@ def single_image_prompt():
 "flame_relation": "at_tool_tip", "separate", "not_observed", or "uncertain";
 "description": one short sentence naming visible objects and evidence, under 300 characters.
 Use burning_material for other material visibly burning, not merely a lighter's own flame. A lighter can coexist with burning material or smoke.
-Do not assume any tool is a lighter. Use at_tool_tip only when a lighter and its flame are both visible. Occlusion means relevant scene evidence is obscured.
+Do not assume any tool is a lighter; a match counts as a lighter. Use at_tool_tip only when a lighter and its flame are both visible. Occlusion means relevant scene evidence is obscured.
+Vapor exhaled from a visible vape or e-cigarette is not smoke: report smoke only for smoke not explained by a visible vape.
 not_observed means not visible, not proven absent; uncertain means the image cannot establish the finding.
 Do not infer ignition cause, danger, priority or safety. Return JSON only, without reasoning or Markdown.'''

@@ -133,8 +133,8 @@ async function uploadPolicy(app,cookie){
   assert.equal(r.statusCode,202,r.body);await app.fireguard.waitForJobs();
   return (await app.inject({url:`/v1/videos/${r.json().id}`,headers:{cookie}})).json().result.priority.reason;
 }
-test('testers have their own policy id: only listing tester changes their lighter or hazard policy',async()=>{
-  const cases=[[{},'uncontained_flame','uncontained_flame'],
+test('testers have their own policy id: a lighter is low priority for everyone unless cameras are listed',async()=>{
+  const cases=[[{},'lighter_evidence_pending','contained_lighter'],
     [{expectedCameraIds:['test-camera'],hazardCameraIds:['test-camera']},'uncontained_flame','uncontained_flame'],
     [{expectedCameraIds:['tester']},'lighter_evidence_pending','contained_lighter'],
     [{hazardCameraIds:['tester']},'reviewed_site_hazard','reviewed_site_hazard']];

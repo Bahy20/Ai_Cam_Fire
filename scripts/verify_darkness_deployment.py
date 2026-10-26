@@ -64,7 +64,7 @@ async def replay(config,cookie,expect_lighter):
         c=ts-offset;i=bisect.bisect_left(sent,c);best=min(sent[max(0,i-1):i+1],key=lambda s:abs(s-c))
         return frames[best] if abs(best-c)<=1000 and frames[best] is not None else default
     scored=[r for r in results if video_s(r.get('source_ts_ms')) is not None]
-    assert scored and all(r['priority']['policy_version']=='minicpm-only-v4' and r['detection']['source']=='minicpm' for r in scored)
+    assert scored and all(r['priority']['policy_version']=='minicpm-only-v5' and r['detection']['source']=='minicpm' for r in scored)
     reports={r['native_stream']['assessment_ts_ms']:r['native_stream']['assessment'] for r in scored
              if (r.get('native_stream') or {}).get('assessment')}
     mapped=[{'video_s':video_s(ts),'row':row} for ts,row in reports.items() if video_s(ts) is not None]
@@ -79,7 +79,7 @@ async def replay(config,cookie,expect_lighter):
     OUT.joinpath('deployed-user-summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
     print(json.dumps({k:v for k,v in summary.items() if k!='reports'}),flush=True)
     assert len(mapped)>=10,'Native reports did not remain periodic'
-    # Testers share the policy id 'tester', which gets the lighter downgrade only when listed in EXPECTED_LIGHTER_CAMERAS.
+    # Testers share the policy id 'tester'; the lighter downgrade applies to all cameras unless EXPECTED_LIGHTER_CAMERAS lists others.
     if expect_lighter:assert summary['lighter_monitor_results']>0,'Lighter never received monitoring priority'
     else:assert summary['lighter_monitor_results']==0,'Testers got lighter monitoring without being listed'
     assert tail and summary['tail_current_smoke_detected']==0,'Historical smoke leaked into the current room view'
@@ -90,7 +90,8 @@ def main():
     r=s.get(base+'/health',timeout=180);r.raise_for_status();h=r.json()
     assert h['live_vlm_mode']=='native_visual_stream' and not h['live_active'] and not h['video_job_active'] and h['yolo_enabled'] is False,h
     r=s.post(base+'/testing/login',headers={'Origin':base},json={'code':config['tester_code']},timeout=30);r.raise_for_status()
-    expect_lighter='tester' in load_environment().get('EXPECTED_LIGHTER_CAMERAS','').split(',')
+    listed={v.strip() for v in load_environment().get('EXPECTED_LIGHTER_CAMERAS','').split(',') if v.strip()}
+    expect_lighter=not listed or bool(listed&{'*','tester'})
     asyncio.run(replay(config,'; '.join(k+'='+v for k,v in s.cookies.items()),expect_lighter))
 
 if __name__=='__main__':main()

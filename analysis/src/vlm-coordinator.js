@@ -2,7 +2,7 @@ import {randomUUID} from 'node:crypto';
 import {qualifyModelInvestigation,scoutHandheldAssessmentApplies} from '../shared/investigation.js';
 import {toInvestigation,MINICPM_MODEL,MINICPM_REVISION} from './minicpm.js';
 
-export const POLICY_VERSION='minicpm-only-v4';
+export const POLICY_VERSION='minicpm-only-v5';
 const AGE=10000,RECEIPT=5000,HAZARD_CONFIRM=2,HAZARD_CONFIRM_MS=20000,HAZARD_CONFIRM_LOW_DETAIL_MS=40000,HAZARD_REFUTE=3,CLEAR_GAP=15000,MOTION_GAP=2000;
 const clearObservation=row=>['flame','smoke','burning_material','occlusion','flame_relation'].every(k=>row[k]==='not_observed');
 const hazardObservation=row=>row.smoke==='present'||row.burning_material==='present'||row.flame==='present'&&row.flame_relation==='separate';

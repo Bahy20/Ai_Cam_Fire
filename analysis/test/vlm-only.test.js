@@ -119,7 +119,7 @@ test('slow clear reports up to 15 s apart release the latch without hiding incid
     confirmed(s);const incident=s.c.result().incident_id;
     slowClear(s,100000,8000,i=>{if(i<8)assert.equal(s.c.result().priority.reason,'verified_hazard_unresolved',String(i));});
     const r=s.c.result();
-    assert.notEqual(r.priority.reason,'verified_hazard_unresolved');assert.equal(r.priority.policy_version,'minicpm-only-v4');
+    assert.notEqual(r.priority.reason,'verified_hazard_unresolved');assert.equal(r.priority.policy_version,'minicpm-only-v5');
     assert.equal(r.incident_history.clear_evidence_current,true);assert.equal(r.incident_history.clear_observations,8);
     assert.equal(r.incident_history.model_hazard,true);assert.equal(r.incident_history.latest_hazard.ts_ms,100000);
     assert.equal(r.incident_id,incident);assert.notEqual(r.detection.state,'confirmed');

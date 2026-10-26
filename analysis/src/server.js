@@ -56,7 +56,10 @@ export async function buildServer(options={}) {
   const uploadTimeoutMs=options.uploadTimeoutMs??900000,requestTimeoutMs=options.requestTimeoutMs??120000;
   const nativeStreamFactory=options.nativeStreamFactory??(process.env.MINICPM_NATIVE_URL?
     settings=>new NativeStream({url:process.env.MINICPM_NATIVE_URL,token:nativeToken,...settings}):null);
-  const expected=new Set(options.expectedCameraIds??(process.env.EXPECTED_LIGHTER_CAMERAS??'').split(',').filter(Boolean));
+  // A lighter flame at its tip is low priority for every camera and tester unless the operator lists specific cameras
+  // (EXPECTED_LIGHTER_CAMERAS); '*' or an empty list means all.
+  const expected=new Set(options.expectedCameraIds??(process.env.EXPECTED_LIGHTER_CAMERAS??'').split(',').map(v=>v.trim()).filter(Boolean));
+  const lighterAll=!expected.size||expected.has('*');
   const hazards=new Set(options.hazardCameraIds??(process.env.HAZARDOUS_CAMERAS??'').split(',').filter(Boolean));
   const app=Fastify({logger:false,bodyLimit:MAX_MESSAGE,requestTimeout:uploadTimeoutMs,
     ...(options.https?{https:options.https}:{})});
@@ -82,7 +85,7 @@ export async function buildServer(options={}) {
       onResult(body);
     }:onResult;
     const c=new VlmCoordinator({cameraId,sessionId,mode,onResult:watched,
-      store,scout,now,expectedLighterUse:expected.has(policyCameraId),siteHazard:hazards.has(policyCameraId),streaming:mode==='live'&&Boolean(nativeStreamFactory)});
+      store,scout,now,expectedLighterUse:lighterAll||expected.has(policyCameraId),siteHazard:hazards.has(policyCameraId),streaming:mode==='live'&&Boolean(nativeStreamFactory)});
     signature=criticalSignature(c.result());coordinators.add(c);return c;
   };
   const retire=async c=>{await c.drain();coordinators.delete(c);};

@@ -15,7 +15,7 @@ import export_false_alarms as fa
 
 ROOT=Path(__file__).resolve().parents[2]
 TEMPLATE=ROOT/'scripts/evaluation/webcam-set.template.json'
-POLICY='minicpm-only-v4'
+POLICY='minicpm-only-v5'
 
 def label(cid,category='negative_dark_object',smoke=False,flame=False,material=False,lighter=False,expected=('monitor','unknown'),split='development',**extra):
     return {'id':cid,'file':f'clips/{cid}.mp4','sha256':None,'status':'available','category':category,'split':split,

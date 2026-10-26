@@ -184,9 +184,9 @@ test('health reports the deployed policy version and build id',async()=>{
   delete process.env.FIREGUARD_BUILD_ID;
   const app=await buildServer({token:'test',dataDir:dir,store,frameReader:{close(){}},scout:{configured:false}});
   try{
-    let h=(await app.inject({url:'/health'})).json();assert.equal(h.policy_version,'minicpm-only-v4');assert.equal(h.build_id,null);
+    let h=(await app.inject({url:'/health'})).json();assert.equal(h.policy_version,'minicpm-only-v5');assert.equal(h.build_id,null);
     process.env.FIREGUARD_BUILD_ID='3f9c2a71be04';h=(await app.inject({url:'/health'})).json();
-    assert.equal(h.build_id,'3f9c2a71be04');assert.equal(h.policy_version,'minicpm-only-v4');
+    assert.equal(h.build_id,'3f9c2a71be04');assert.equal(h.policy_version,'minicpm-only-v5');
   }finally{
     if(previous===undefined)delete process.env.FIREGUARD_BUILD_ID;else process.env.FIREGUARD_BUILD_ID=previous;
     await app.close();store.close();await rm(dir,{recursive:true,force:true});
