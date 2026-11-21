@@ -4,18 +4,17 @@ Advisory camera fire/smoke monitoring. A webcam or uploaded recording is analyse
 
 ## Components
 
-- `analysis/`: CPU gateway (`src/server.js`, Fastify HTTP/WSS, SQLite store, tester page at `/testing`), the production coordinator `src/vlm-coordinator.js` (policy `minicpm-only-v5`), the frame-reader subprocess `frame_reader.py` (bounded decode and pixel quality only) and the Python model workers (`native_server.py`, `native_stream.py`, `visual_stream.py`, `minicpm_client.py`). `analysis/shared/` holds the investigation validator and image-quality gate. Details: [analysis/README.md](analysis/README.md).
+- `analysis/`: CPU gateway (`src/server.js`, Fastify HTTP/WSS, SQLite store, tester page at `/testing`), the production coordinator `src/vlm-coordinator.js` (policy `minicpm-only-v5`), the frame-reader subprocess `frame_reader.py` (bounded decode and pixel quality only) and the Python model code: `native_server.py` (authenticated H100 WSS server), `visual_stream.py` (the active per-image native adapter), `minicpm_client.py` (gateway bridge to `Vision`) and `minicpm_contract.py` (pinned model, prompt and strict parser). `native_stream.py` is the earlier forced-speech duplex adapter, kept only for `deploy/native_probe.py` and its tests. `analysis/shared/` holds the investigation validator and image-quality gate. Details: [analysis/README.md](analysis/README.md).
 - `deploy/modal_app.py`: the Modal app: `Analysis` (CPU gateway), `NativeLive` (H100, native MiniCPM streaming for live video) and `Vision` (L40S, image-batch endpoint for uploads), plus probes and the benchmark.
 - `camera/`: local capture-only bridge (no model) that sends webcam JPEGs to the gateway over WSS.
 - `scripts/`: Modal secrets (`configure_modal.py`), launchers (`run_camera_modal.py`, `run_two_server.py`), deployment checks (`check_modal.py`, `verify_*.py`) and the webcam test set (`evaluate_webcam_set.py`, `export_false_alarms.py`).
-- `legacy/`: the retired Cloudflare Worker, Raspberry Pi edge agent and YOLO detector, kept for reference only (see [legacy/README.md](legacy/README.md)).
 
 ## Flows
 
 - **Live:** browser or `camera/` bridge -> WSS `/v1/live` on the gateway -> quality-checked frames (up to 3/s) -> one authenticated WSS to `NativeLive` -> strict per-image report -> coordinator -> priority result back over the same socket.
 - **Upload:** `POST /v1/videos` (MP4/MOV/AVI, up to 250 MiB / 10 min) -> frame reader samples and checks frames -> `Vision` image batches -> coordinator -> poll `GET /v1/videos/:id`.
 
-Policy `minicpm-only-v5`: monitoring needs three agreeing reports spanning at least 2 s; smoke, burning material or a separate flame latch an urgent hazard that survives darkness and reconnect; lighter monitoring needs a reviewed camera (`EXPECTED_LIGHTER_CAMERAS`); missing, stale or low-quality evidence is `unknown`. Full rules: [docs/model-only-analysis.md](docs/model-only-analysis.md).
+Policy `minicpm-only-v5`: monitoring needs three agreeing reports spanning at least 2 s; smoke, burning material or a separate flame latch an urgent hazard (on two reports within 20 s) that survives darkness and reconnect until eight consecutive clear reports or an operator review; a contained lighter or match flame is low priority (`monitor`) on every camera and for testers unless `EXPECTED_LIGHTER_CAMERAS` restricts it to listed cameras; missing, stale or low-quality evidence is `unknown`. Full rules: [docs/model-only-analysis.md](docs/model-only-analysis.md).
 
 ## Run and deploy
 

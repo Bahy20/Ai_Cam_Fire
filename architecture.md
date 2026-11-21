@@ -19,7 +19,14 @@ Upload: POST /v1/videos --> frame_reader.py samples + checks frames --> Vision (
 
 ## Policy
 
-`minicpm-only-v5` reads only strict frame-bound model enums. Monitoring needs three distinct agreeing reports spanning at least 2 s within a bounded support pool. Smoke, burning material or a separate flame latch an urgent hazard that persists through darkness and reconnect until enough consecutive clear reports or an operator review. Lighter monitoring is allowed only for reviewed cameras (`EXPECTED_LIGHTER_CAMERAS`); `HAZARDOUS_CAMERAS` can escalate. Missing, stale, dark, occluded or invalid evidence is `unknown`. Cause is never established. Full rules and verification: `docs/model-only-analysis.md`.
+`minicpm-only-v5` reads only strict frame-bound model enums. Monitoring needs three distinct agreeing reports spanning at least 2 s within a bounded support pool. Smoke, burning material or a separate flame latch an urgent hazard on two reports within 20 s (three, pending up to 40 s, when a report comes from a blurry or grainy frame); the latch persists through darkness and reconnect until eight consecutive clear reports or an operator review. A field the report's own description negates counts as uncertain, and frames with whole-view camera motion are skipped. A contained lighter or match flame is low priority (`monitor`) on every camera and for testers; `EXPECTED_LIGHTER_CAMERAS` can restrict that to listed cameras, and `HAZARDOUS_CAMERAS` can escalate. Missing, stale, dark, occluded or invalid evidence is `unknown`. Cause is never established. Full rules and verification: `docs/model-only-analysis.md`.
+
+## Storage and health
+
+- SQLite (`node:sqlite`, WAL) keeps sessions, events, inferences, operator reviews and upload jobs. Live events are throttled to changes plus a 30 s heartbeat and pruned after 7 days; recorded timelines, reviews and jobs are kept.
+- Selected JPEG evidence is a 256 MiB oldest-first ring buffer that never evicts sessions which latched a hazard or were reviewed. Uploaded videos are deleted after processing.
+- On Modal, the store and evidence are snapshotted to the `fireguard-analysis-data` volume every 5 s (committed every 10 s); a hazard latch or review triggers an immediate snapshot and commit. Five consecutive snapshot failures stop the gateway.
+- `/health` is public and reports `policy_version`, `build_id` (hash of the shipped gateway files), the VLM provider/model, `live_vlm_mode`, active live/upload work and frame-reader restarts/last failure.
 
 ## Secrets and deploy
 
@@ -27,4 +34,4 @@ Upload: POST /v1/videos --> frame_reader.py samples + checks frames --> Vision (
 
 ## Legacy
 
-The earlier Raspberry Pi + Cloudflare Worker + YOLO design is retired and archived under `legacy/`; nothing in the product imports it.
+The earlier Raspberry Pi + Cloudflare Worker + YOLO design is retired and its code removed from this repository. It remains in git history (commit `7cbeb2b`, directory `legacy/`).

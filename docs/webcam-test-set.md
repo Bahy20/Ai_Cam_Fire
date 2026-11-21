@@ -85,7 +85,7 @@ Suggested `expected_priority` values:
 
 - Negatives and an unlit lighter: `["monitor", "unknown"]`. Unknown is a valid "review required" answer.
 - Smoke and material: `"inspect_urgently"`, or `["inspect_urgently", "escalate"]` if the camera id is in `HAZARDOUS_CAMERAS`.
-- A lit lighter: leave `null` unless you know the gateway's `EXPECTED_LIGHTER_CAMERAS` setting for the camera id the run uses.
+- A lit lighter: depends on the gateway's `EXPECTED_LIGHTER_CAMERAS`. With the default (empty or `*`) a contained flame is downgraded on every camera, so `["monitor", "unknown"]` fits; if the setting lists cameras and the run's camera id is not among them, the flame is `inspect_urgently`. Leave `null` when you do not know the setting.
 
 ## Running the evaluation
 

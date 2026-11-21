@@ -1,6 +1,0 @@
-# CPU/local edge inference. No remote detector SDK is required.
-# Choose compatible CPU torch/torchvision wheels for your Pi OS/Python first.
-ultralytics>=8.3,<9
-opencv-python>=4.10,<6
-numpy>=1.26,<3
-requests>=2.32,<3

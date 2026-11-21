@@ -36,19 +36,20 @@ An earlier alert is now labeled separately from a current positive finding. On t
 
 Service clients may POST `/v1/live/:assessment_session_id/review` with exactly `incident_id`, `last_hazard_ts_ms` (from `incident_history.latest_hazard.ts_ms`, or null for a legacy alert), and `action` (`false_alarm` or `incident_resolved`). Tester cookies can review only their own active camera using the configured Origin. A changed incident/evidence timestamp returns409; the operator must review the new finding. Reviews remain in SQLite `alert_reviews` and the result's `incident_history.last_review`. The ignition-source label explicitly says it is not established; this action does not infer cause or certify safety.
 
-SQLite snapshots, bounded diagnostic records and selected JPEG evidence remain. Uploaded videos are deleted after processing. Evidence storage is capped at256MiB and reports retention failure explicitly. Both GPU pools have zero minimum containers; inference still consumes Modal credits.
+SQLite snapshots, bounded diagnostic records and selected JPEG evidence remain. Live events are stored only on change plus a 30-second heartbeat, and live events and inferences older than 7 days are pruned hourly (recorded timelines, sessions, reviews and jobs are kept). Uploaded videos are deleted after processing. Evidence storage is a 256MiB oldest-first buffer that never evicts sessions which latched a hazard or were reviewed, and it reports retention failure explicitly. On Modal a hazard latch or operator review is snapshotted and committed to the volume immediately rather than at the next 5-second tick. Both GPU pools have zero minimum containers; inference still consumes Modal credits.
 
 ## Verification
 
 ```powershell
 npm --prefix analysis test
+.venv/Scripts/python.exe -m unittest camera.test_camera
 .venv/Scripts/python.exe -m unittest discover -s analysis/test -p '*_test.py'
 .venv/Scripts/python.exe -m unittest discover -s scripts/tests
 .venv/Scripts/python.exe scripts/verify_darkness_deployment.py
 .venv/Scripts/python.exe scripts/verify_model_only_upload.py
 ```
 
-The deployment verification scripts use private local configuration without printing credentials. They make real public GPU calls. The retired detector/Worker code and its tests are archived under `legacy/` and are not part of this product. See `docs/model-only-analysis.md` for fresh deployment evidence and limitations.
+The first four are local; on 21 November 2026 they passed 125 JavaScript, 8 camera, 13 frame-reader and 60 script tests. The deployment verification scripts use private local configuration without printing credentials. They make real public GPU calls. The retired detector/Worker code was removed; it remains in git history at commit `7cbeb2b`. See `docs/model-only-analysis.md` for fresh deployment evidence and limitations.
 
 ## Webcam test set
 
